@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+
+# Model weights (too large for Git — store in Google Drive)
+models/
+model/runs/
+*.pt
+*.onnx
+*.engine
+*.trt
+
+# Dataset (too large for Git — store in Roboflow/Google Drive)
+data/images/
+data/labels/
+data/datasets/
+*.zip
+
+# Database (generated at runtime)
+*.db
+*.sqlite
+
+# Snapshots (generated at runtime)
+data/snapshots/
+
+# Node.js
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/build/
+frontend/.env.local
+frontend/.env
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# YOLOv8 / Ultralytics
+runs/
+wandb/
