@@ -62,3 +62,6 @@ logs/
 # YOLOv8 / Ultralytics
 runs/
 wandb/
+
+# Docker
+postgres_data/
