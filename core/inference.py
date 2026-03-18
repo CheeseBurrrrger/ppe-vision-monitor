@@ -82,13 +82,14 @@ class APDInferencePipeline:
 
     def __init__(
         self,
-        model_path:  str   = "yolo11s.pt",
-        confidence:  float = 0.45,
-        iou:         float = 0.45,
-        camera_id:   str   = "CAM_01",
-        output_dir:  str   = "inference_output",
-        device:      str   = "cpu",
-        skip_frames: int   = 1,
+        model_path:  str          = "yolo11s.pt",
+        confidence:  float        = 0.45,
+        iou:         float        = 0.45,
+        camera_id:   str          = "CAM_01",
+        output_dir:  str          = "inference_output",
+        device:      str          = "cpu",
+        skip_frames: int          = 1,
+        backend_url: Optional[str] = "http://localhost:8000",
     ):
         self._print_banner()
 
@@ -110,6 +111,7 @@ class APDInferencePipeline:
             output_dir       = str(self.output_dir / "violations"),
             save_screenshots = True,
             log_to_file      = True,
+            backend_url      = backend_url,
         )
 
         # ── State tracking ──
@@ -121,6 +123,8 @@ class APDInferencePipeline:
         print(f"[INFO] IoU           : {iou}")
         print(f"[INFO] Device        : {device}")
         print(f"[INFO] Skip frames   : setiap {skip_frames} frame")
+        backend_info = backend_url if backend_url else "OFF (lokal only)"
+        print(f"[INFO] Backend       : {backend_info}")
         print(f"[INFO] Output        : {self.output_dir.resolve()}\n")
 
     # ────────────────────────────────────────────
@@ -503,6 +507,10 @@ Contoh:
         help="Simpan output visualisasi ke file .mp4")
     parser.add_argument("--no-preview", action="store_true",
         help="Matikan jendela preview (lebih cepat)")
+    parser.add_argument("--backend-url", default="http://localhost:8000",
+        help="URL backend API (default: http://localhost:8000)")
+    parser.add_argument("--no-backend", action="store_true",
+        help="Matikan pengiriman ke backend, simpan lokal saja")
     return parser.parse_args()
 
 
@@ -513,6 +521,8 @@ Contoh:
 if __name__ == "__main__":
     args = parse_args()
 
+    backend_url = None if args.no_backend else args.backend_url
+
     pipeline = APDInferencePipeline(
         model_path  = args.model,
         confidence  = args.conf,
@@ -521,6 +531,7 @@ if __name__ == "__main__":
         output_dir  = args.output,
         device      = args.device,
         skip_frames = args.skip,
+        backend_url = backend_url,
     )
 
     pipeline.run(
