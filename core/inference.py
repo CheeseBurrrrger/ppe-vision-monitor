@@ -1,43 +1,36 @@
 """
 inference.py
 ============
-Pipeline inference YOLOv11 untuk deteksi APD (helm, rompi, sepatu safety).
-Terhubung langsung dengan frame_reader.py sebagai sumber frame.
+Pipeline inference YOLOv11 untuk deteksi APD secara real-time.
+Terintegrasi penuh dengan:
+  - frame_reader.py    → handle berbagai sumber video
+  - violation_logic.py → logika pelanggaran + cooldown + screenshot + log
 
 Capstone Project: Sistem Monitoring K3 Berbasis Computer Vision
 
 Cara pakai:
-  # Mode 1: Inference langsung dari webcam / video / RTSP
-  python inference.py --source 0
-  python inference.py --source rekaman.mp4
-  python inference.py --source rtsp://admin:pass@192.168.1.100:554/stream
+  python inference.py --source 0                          # webcam
+  python inference.py --source rekaman.mp4                # file video
+  python inference.py --source rtsp://ip:port/stream      # kamera IP
+  python inference.py --source saved_frames/folder/       # folder frame
+  python inference.py --source rekaman.mp4 --conf 0.45 --skip 2
+  python inference.py --source rekaman.mp4 --save-video hasil.mp4 --no-preview
 
-  # Mode 2: Inference dari folder frame hasil frame_reader.py
-  python inference.py --source saved_frames/webcam0_20250312_143022/
-
-  # Opsi tambahan
-  python inference.py --source rekaman.mp4 --conf 0.45 --model yolo11s.pt
-  python inference.py --source rekaman.mp4 --no-preview --save-video output.mp4
-
-  #
-  jika pc tidak ada gpu tambahkan --device cpu saat running
-  contoh : python inference.py --source 0 --device cpu
+# Catatan: Mode CPU lebih lambat dari GPU. Kalau terasa lag, tambahkan --skip 3 supaya inference hanya tiap 3 frame:
 """
 
 import cv2
 import time
-import json
 import argparse
 import numpy as np
 from pathlib import Path
-from datetime import datetime
-from dataclasses import dataclass, field, asdict
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
-# Import frame_reader dari file yang sama folder
+# ── Import modul project ──────────────────────
 from frame_reader import open_source, get_video_info
+from violation_logic import ViolationLogic, Detection, ViolationEvent, VIOLATION_CLASSES
 
-# Import YOLOv11
+# ── Import YOLOv11 ────────────────────────────
 try:
     from ultralytics import YOLO
 except ImportError:
@@ -48,10 +41,10 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────
-#  KONFIGURASI
+#  KONFIGURASI KELAS
+#  Sesuaikan dengan dataset.yaml tim kamu
 # ─────────────────────────────────────────────
 
-# Kelas APD — sesuaikan dengan dataset.yaml kamu
 CLASS_NAMES = {
     0: "helmet",
     1: "no_helmet",
@@ -63,50 +56,13 @@ CLASS_NAMES = {
 
 # Warna bounding box per kelas (BGR)
 CLASS_COLORS = {
-    "helmet":        (0, 200, 0),     # Hijau tua
-    "no_helmet":     (0, 0, 220),     # Merah
-    "vest":          (0, 200, 0),     # Hijau tua
-    "no_vest":       (0, 0, 220),     # Merah
-    "safety_boot":   (0, 200, 0),     # Hijau tua
-    "no_safety_boot":(0, 0, 220),     # Merah
+    "helmet":         (0, 210, 0),    # hijau
+    "no_helmet":      (0, 0, 220),    # merah
+    "vest":           (0, 210, 0),    # hijau
+    "no_vest":        (0, 0, 220),    # merah
+    "safety_boot":    (0, 210, 0),    # hijau
+    "no_safety_boot": (0, 0, 220),    # merah
 }
-
-# Kelas yang dianggap PELANGGARAN
-VIOLATION_CLASSES = {"no_helmet", "no_vest", "no_safety_boot"}
-
-# Aturan pelanggaran: cooldown supaya tidak spam event
-VIOLATION_RULES = {
-    "no_helmet":      {"severity": "HIGH",   "cooldown": 15},
-    "no_vest":        {"severity": "HIGH",   "cooldown": 15},
-    "no_safety_boot": {"severity": "MEDIUM", "cooldown": 30},
-}
-
-
-# ─────────────────────────────────────────────
-#  DATA CLASS
-# ─────────────────────────────────────────────
-
-@dataclass
-class Detection:
-    """Satu objek yang terdeteksi dalam satu frame."""
-    class_id:   int
-    class_name: str
-    confidence: float
-    bbox:       Tuple[int, int, int, int]   # x1, y1, x2, y2
-    is_violation: bool = False
-
-@dataclass
-class ViolationEvent:
-    """Event pelanggaran yang siap dikirim ke backend."""
-    event_id:        str
-    timestamp:       str
-    camera_id:       str
-    violation_type:  str
-    severity:        str
-    confidence:      float
-    bbox:            dict
-    frame_number:    int
-    screenshot_path: Optional[str] = None
 
 
 # ─────────────────────────────────────────────
@@ -115,71 +71,74 @@ class ViolationEvent:
 
 class APDInferencePipeline:
     """
-    Pipeline utama: baca frame → inference YOLO → deteksi pelanggaran → simpan event.
-    Terintegrasi dengan frame_reader.py untuk handle berbagai sumber video.
+    Pipeline utama deteksi APD.
+
+    Alur kerja per frame:
+    ┌──────────────┐   ┌───────────────┐   ┌─────────────────┐   ┌──────────┐
+    │ frame_reader │ → │  YOLOv11      │ → │ violation_logic │ → │  Output  │
+    │ (sumber vid) │   │  inference    │   │ cooldown+event  │   │ vis+log  │
+    └──────────────┘   └───────────────┘   └─────────────────┘   └──────────┘
     """
 
     def __init__(
         self,
-        model_path:       str   = "yolo11s.pt",  # auto-download jika belum ada
-        confidence:       float = 0.45,
-        iou:              float = 0.45,
-        camera_id:        str   = "CAM_01",
-        output_dir:       str   = "inference_output",
-        device:           str   = "0",            # "0"=GPU, "cpu"=CPU
-        skip_frames:      int   = 1,              # proses setiap N frame
+        model_path:  str   = "yolo11s.pt",
+        confidence:  float = 0.45,
+        iou:         float = 0.45,
+        camera_id:   str   = "CAM_01",
+        output_dir:  str   = "inference_output",
+        device:      str   = "cpu",
+        skip_frames: int   = 1,
     ):
-        print(f"\n{'='*55}")
-        print(f"  APD Inference Pipeline - YOLOv11")
-        print(f"{'='*55}")
-        print(f"  Model      : {model_path}")
-        print(f"  Confidence : {confidence}")
-        print(f"  IoU        : {iou}")
-        print(f"  Device     : {'GPU' if device != 'cpu' else 'CPU'}")
-        print(f"{'='*55}\n")
+        self._print_banner()
 
-        # Load model YOLOv11
-        print("[INFO] Loading model YOLOv11 ...")
-        self.model = YOLO(model_path)
-        self.conf  = confidence
-        self.iou   = iou
-        self.device = device
-
-        self.camera_id   = camera_id
+        # ── Load model YOLOv11 ──
+        print(f"[INFO] Loading model : {model_path}")
+        self.model       = YOLO(model_path)
+        self.conf        = confidence
+        self.iou         = iou
+        self.device      = device
         self.skip_frames = skip_frames
+        self.camera_id   = camera_id
+        self.output_dir  = Path(output_dir)
 
-        # Folder output
-        self.output_dir = Path(output_dir)
-        self.screenshot_dir = self.output_dir / "screenshots"
-        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+        # ── Inisialisasi ViolationLogic ──────────
+        # violation_logic.py menangani semua logika pelanggaran:
+        # cooldown, screenshot, log .jsonl, statistik
+        self.violation_logic = ViolationLogic(
+            camera_id        = camera_id,
+            output_dir       = str(self.output_dir / "violations"),
+            save_screenshots = True,
+            log_to_file      = True,
+        )
 
-        # File log pelanggaran
-        self.log_file = self.output_dir / "violations_log.jsonl"
+        # ── State tracking ──
+        self.frame_count = 0
+        self.fps_display = 0.0
+        self.class_count = {name: 0 for name in CLASS_NAMES.values()}
 
-        # State tracking
-        self.frame_count       = 0
-        self.violation_count   = 0
-        self.last_violation_time = {}   # {class_name: timestamp}
+        print(f"[INFO] Confidence    : {confidence}")
+        print(f"[INFO] IoU           : {iou}")
+        print(f"[INFO] Device        : {device}")
+        print(f"[INFO] Skip frames   : setiap {skip_frames} frame")
+        print(f"[INFO] Output        : {self.output_dir.resolve()}\n")
 
-        # Statistik per kelas
-        self.class_detection_count = {name: 0 for name in CLASS_NAMES.values()}
-
-        print(f"[INFO] Output folder : {self.output_dir.resolve()}")
-        print(f"[INFO] Model siap.\n")
-
-    # ── INFERENCE ──────────────────────────────
+    # ────────────────────────────────────────────
+    #  STEP 1 — INFERENCE YOLO
+    # ────────────────────────────────────────────
 
     def run_inference(self, frame: np.ndarray) -> List[Detection]:
         """
         Jalankan YOLOv11 pada satu frame.
-        Return: list Detection yang terdeteksi.
+        Hasil YOLO dikonversi ke list Detection
+        (format yang dipakai violation_logic.py).
         """
         results = self.model(
             frame,
-            conf=self.conf,
-            iou=self.iou,
-            device=self.device,
-            verbose=False,
+            conf    = self.conf,
+            iou     = self.iou,
+            device  = self.device,
+            verbose = False,
         )
 
         detections = []
@@ -193,239 +152,224 @@ class APDInferencePipeline:
                 x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
 
                 detections.append(Detection(
-                    class_id=cid,
-                    class_name=cname,
-                    confidence=conf,
-                    bbox=(x1, y1, x2, y2),
-                    is_violation=(cname in VIOLATION_CLASSES),
+                    class_name = cname,
+                    confidence = conf,
+                    bbox       = (x1, y1, x2, y2),
                 ))
 
-                # Update statistik
-                self.class_detection_count[cname] = (
-                    self.class_detection_count.get(cname, 0) + 1
-                )
+                self.class_count[cname] = self.class_count.get(cname, 0) + 1
 
         return detections
 
-    # ── VIOLATION LOGIC ─────────────────────────
+    # ────────────────────────────────────────────
+    #  STEP 2 — PROSES SATU FRAME PENUH
+    # ────────────────────────────────────────────
 
-    def check_violations(
-        self,
-        detections:   List[Detection],
-        frame:        np.ndarray,
-    ) -> List[ViolationEvent]:
+    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
         """
-        Periksa deteksi → buat ViolationEvent jika ada pelanggaran.
-        Cooldown diterapkan agar tidak spam event yang sama.
+        Satu siklus penuh per frame:
+          1. Inference YOLO → list Detection
+          2. violation_logic.process() → list ViolationEvent + cooldown + log
+          3. get_frame_status() → status APD (COMPLIANT/VIOLATION/UNKNOWN)
+          4. draw_frame() → frame dengan semua overlay visual
         """
-        events       = []
-        current_time = time.time()
+        # Step 1: Inference
+        detections = self.run_inference(frame)
 
-        for det in detections:
-            if not det.is_violation:
-                continue
+        # Step 2: Cek pelanggaran via violation_logic.py
+        #   - Cooldown otomatis ditangani di dalam ViolationLogic
+        #   - Screenshot + log .jsonl disimpan otomatis
+        #   - Return hanya event yang lolos cooldown
+        events = self.violation_logic.process(
+            detections   = detections,
+            frame        = frame,
+            frame_number = self.frame_count,
+        )
 
-            rule = VIOLATION_RULES.get(det.class_name, {})
+        # Step 3: Status APD per frame (untuk panel overlay)
+        apd_status = self.violation_logic.get_frame_status(detections)
 
-            # Cek cooldown
-            last_t   = self.last_violation_time.get(det.class_name, 0)
-            cooldown = rule.get("cooldown", 15)
-            if current_time - last_t < cooldown:
-                continue   # masih dalam cooldown, skip
+        # Step 4: Gambar visualisasi
+        vis = self.draw_frame(frame, detections, events, apd_status)
 
-            # Buat event
-            dt       = datetime.fromtimestamp(current_time)
-            event_id = f"{self.camera_id}_{self.frame_count}_{det.class_name}"
+        return vis
 
-            # Simpan screenshot
-            screenshot_path = self._save_screenshot(frame, det, dt, event_id)
+    # ────────────────────────────────────────────
+    #  STEP 3 — VISUALISASI
+    # ────────────────────────────────────────────
 
-            event = ViolationEvent(
-                event_id        = event_id,
-                timestamp       = dt.isoformat(),
-                camera_id       = self.camera_id,
-                violation_type  = det.class_name,
-                severity        = rule.get("severity", "MEDIUM"),
-                confidence      = round(det.confidence, 4),
-                bbox            = {"x1": det.bbox[0], "y1": det.bbox[1],
-                                   "x2": det.bbox[2], "y2": det.bbox[3]},
-                frame_number    = self.frame_count,
-                screenshot_path = screenshot_path,
-            )
-
-            # Simpan ke log
-            self._log_event(event)
-
-            events.append(event)
-            self.last_violation_time[det.class_name] = current_time
-            self.violation_count += 1
-
-            print(
-                f"  🚨 VIOLATION | {det.class_name:20s} | "
-                f"conf={det.confidence:.2f} | "
-                f"severity={rule.get('severity','?')} | "
-                f"frame={self.frame_count}"
-            )
-
-        return events
-
-    # ── VISUALISASI ─────────────────────────────
-
-    def draw_detections(
+    def draw_frame(
         self,
         frame:      np.ndarray,
         detections: List[Detection],
         events:     List[ViolationEvent],
-        fps:        float,
+        apd_status: dict,
     ) -> np.ndarray:
-        """Gambar bounding box, label, dan overlay info pada frame."""
+        """
+        Gambar semua elemen visual pada frame:
+          - Bounding box + label per deteksi
+          - Info panel kiri atas (frame, FPS, total violations)
+          - Status K3 panel kanan atas (Helm/Rompi/Sepatu)
+          - Banner merah bawah jika ada pelanggaran baru di frame ini
+        """
         vis = frame.copy()
+        h, w = vis.shape[:2]
 
-        # Gambar setiap detection
+        # ── Bounding box + label ──
         for det in detections:
             x1, y1, x2, y2 = det.bbox
-            color = CLASS_COLORS.get(det.class_name, (255, 255, 0))
-            thick = 3 if det.is_violation else 2
+            is_viol = det.class_name in VIOLATION_CLASSES
+            color   = CLASS_COLORS.get(det.class_name, (200, 200, 0))
+            thick   = 3 if is_viol else 2
 
-            # Box
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, thick)
 
-            # Label background
             label = f"{det.class_name} {det.confidence:.2f}"
-            (tw, th), _ = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
-            )
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)
             cv2.rectangle(vis, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-
-            # Label text
             cv2.putText(
                 vis, label, (x1 + 2, y1 - 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                 (255, 255, 255), 1, cv2.LINE_AA
             )
 
-        # Overlay info kanan atas
-        h, w = vis.shape[:2]
+        # ── Info panel kiri atas ──
+        overlay = vis.copy()
+        cv2.rectangle(overlay, (0, 0), (265, 98), (25, 25, 25), -1)
+        cv2.addWeighted(overlay, 0.6, vis, 0.4, 0, vis)
+
+        total_viol = self.violation_logic.stats["total_events"]
         info_lines = [
-            f"FPS: {fps:.1f}",
-            f"Frame: {self.frame_count}",
-            f"Detections: {len(detections)}",
-            f"Violations: {self.violation_count}",
+            f"Camera : {self.camera_id}",
+            f"Frame  : {self.frame_count}",
+            f"FPS    : {self.fps_display:.1f}",
+            f"Viol   : {total_viol} event",
         ]
         for i, line in enumerate(info_lines):
             cv2.putText(
-                vis, line,
-                (w - 210, 30 + i * 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65,
-                (0, 255, 255), 2, cv2.LINE_AA
+                vis, line, (8, 20 + i * 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                (0, 220, 220), 1, cv2.LINE_AA
             )
 
-        # Banner VIOLATION merah jika ada event baru
-        if events:
-            cv2.rectangle(vis, (0, h - 50), (w, h), (0, 0, 180), -1)
-            label_viol = f"⚠ VIOLATION DETECTED: {events[0].violation_type.upper()}"
+        # ── Status K3 panel kanan atas ──
+        status_style = {
+            "COMPLIANT": ("Patuh   ", (0, 200, 0)),
+            "VIOLATION": ("LANGGAR!", (0, 0, 220)),
+            "UNKNOWN":   ("Tdk Ada ", (130, 130, 130)),
+        }
+        panel_w = 185
+        px      = w - panel_w - 8
+
+        overlay2 = vis.copy()
+        cv2.rectangle(overlay2, (px - 6, 0), (w, 82), (25, 25, 25), -1)
+        cv2.addWeighted(overlay2, 0.6, vis, 0.4, 0, vis)
+
+        apd_labels = {
+            "helmet":      "Helm  ",
+            "vest":        "Rompi ",
+            "safety_boot": "Sepatu",
+        }
+        for i, (key, label) in enumerate(apd_labels.items()):
+            s           = apd_status.get(key, "UNKNOWN")
+            text, color = status_style[s]
             cv2.putText(
-                vis, label_viol,
-                (10, h - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.75,
+                vis,
+                f"{label}: {text}",
+                (px, 22 + i * 23),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.54,
+                color, 1, cv2.LINE_AA
+            )
+
+        # ── Banner pelanggaran bawah layar ──
+        if events:
+            names = ", ".join(
+                e.violation_type.replace("_", " ").upper() for e in events
+            )
+            overlay3 = vis.copy()
+            cv2.rectangle(overlay3, (0, h - 50), (w, h), (0, 0, 175), -1)
+            cv2.addWeighted(overlay3, 0.85, vis, 0.15, 0, vis)
+            cv2.putText(
+                vis,
+                f"  PELANGGARAN: {names}",
+                (8, h - 13),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.72,
                 (255, 255, 255), 2, cv2.LINE_AA
             )
 
         return vis
 
-    # ── MAIN LOOP ───────────────────────────────
+    # ────────────────────────────────────────────
+    #  MAIN RUN
+    # ────────────────────────────────────────────
 
     def run(
         self,
         source,
-        show_preview: bool = True,
+        show_preview: bool          = True,
         save_video:   Optional[str] = None,
     ):
         """
-        Main loop. Baca frame dari source (webcam/file/RTSP/folder),
-        jalankan inference, deteksi pelanggaran, tampilkan hasil.
-
-        source bisa berupa:
-          - int / str angka   → webcam
-          - str path file     → video .mp4/.avi/dll
-          - str "rtsp://..."  → RTSP stream
-          - str path folder   → folder hasil frame_reader.py
+        Entry point. Deteksi otomatis tipe source:
+          - Folder gambar → _run_from_folder()
+          - Webcam / file / RTSP → _run_from_stream()
         """
+        if Path(str(source)).is_dir():
+            self._run_from_folder(Path(str(source)), show_preview, save_video)
+        else:
+            self._run_from_stream(source, show_preview, save_video)
 
-        # ── Deteksi apakah source adalah folder frame ──
-        source_path = Path(str(source))
-        if source_path.is_dir():
-            return self._run_from_folder(source_path, show_preview, save_video)
-
-        # ── Source adalah video / webcam / RTSP ──
+    def _run_from_stream(self, source, show_preview, save_video):
+        """Loop dari webcam / file video / RTSP."""
         cap  = open_source(source)
         info = get_video_info(cap)
 
         print(f"[INFO] Source    : {source}")
         print(f"[INFO] Resolusi  : {info['width']}x{info['height']} @ {info['fps']:.1f}fps")
-        if info['total'] > 0:
+        if info["total"] > 0:
             print(f"[INFO] Total frame: {info['total']}")
+        print(f"[INFO] Tekan Q untuk berhenti.\n")
 
-        # Setup VideoWriter jika diminta simpan video
-        writer = None
-        if save_video:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(
-                save_video, fourcc,
-                info['fps'], (info['width'], info['height'])
-            )
-            print(f"[INFO] Simpan video ke: {save_video}")
-
-        t_start  = time.perf_counter()
-        fps_display = 0.0
-
-        print(f"\n[INFO] Mulai inference. Tekan Q untuk berhenti.\n")
+        writer  = self._init_writer(save_video, info["fps"], info["width"], info["height"])
+        t_start = time.perf_counter()
 
         try:
             while True:
                 ret, frame = cap.read()
                 if not ret:
-                    print("\n[INFO] Stream selesai.")
+                    print("\n[INFO] Stream selesai / koneksi putus.")
                     break
 
                 self.frame_count += 1
+                elapsed          = time.perf_counter() - t_start
+                self.fps_display = self.frame_count / elapsed if elapsed > 0 else 0
 
-                # Hitung FPS display
-                elapsed     = time.perf_counter() - t_start
-                fps_display = self.frame_count / elapsed if elapsed > 0 else 0
-
-                # Skip frame untuk efisiensi
+                # Skip frame untuk efisiensi CPU
                 if self.frame_count % self.skip_frames != 0:
                     if show_preview:
                         cv2.imshow("APD Monitor [Q=quit]", frame)
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                        if cv2.waitKey(1) & 0xFF == ord("q"):
                             break
                     continue
 
-                # ── INFERENCE ──
-                detections = self.run_inference(frame)
-
-                # ── VIOLATION CHECK ──
-                events = self.check_violations(detections, frame)
-
-                # ── VISUALISASI ──
-                vis_frame = self.draw_detections(frame, detections, events, fps_display)
+                # Proses frame (inference + violation + visualisasi)
+                vis = self._process_frame(frame)
 
                 if show_preview:
-                    cv2.imshow("APD Monitor [Q=quit]", vis_frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                    cv2.imshow("APD Monitor [Q=quit]", vis)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
                         print("\n[INFO] Dihentikan pengguna.")
                         break
 
                 if writer:
-                    writer.write(vis_frame)
+                    writer.write(vis)
 
-                # Progress tiap 30 frame
                 if self.frame_count % 30 == 0:
+                    total_viol = self.violation_logic.stats["total_events"]
                     print(
                         f"\r  Frame={self.frame_count} | "
-                        f"FPS={fps_display:.1f} | "
-                        f"Violations={self.violation_count}   ",
+                        f"FPS={self.fps_display:.1f} | "
+                        f"Violations={total_viol}   ",
                         end="", flush=True
                     )
 
@@ -436,32 +380,21 @@ class APDInferencePipeline:
             cv2.destroyAllWindows()
             self._print_summary()
 
-    def _run_from_folder(
-        self,
-        folder: Path,
-        show_preview: bool,
-        save_video: Optional[str],
-    ):
-        """
-        Inference dari folder frame hasil frame_reader.py.
-        Berguna untuk test model tanpa perlu video langsung.
-        """
-        # Ambil semua file gambar di folder, urut berdasarkan nama
+    def _run_from_folder(self, folder, show_preview, save_video):
+        """Loop dari folder frame hasil frame_reader.py."""
         img_files = sorted(
             list(folder.glob("*.jpg")) +
             list(folder.glob("*.png")) +
             list(folder.glob("*.jpeg"))
         )
-
         if not img_files:
-            raise FileNotFoundError(f"[ERROR] Tidak ada gambar di folder: {folder}")
+            raise FileNotFoundError(f"[ERROR] Tidak ada gambar di: {folder}")
 
-        print(f"[INFO] Mode: Folder frame")
-        print(f"[INFO] Folder  : {folder.resolve()}")
-        print(f"[INFO] Total   : {len(img_files)} gambar")
-        print(f"\n[INFO] Mulai inference. Tekan Q untuk berhenti.\n")
+        print(f"[INFO] Mode folder : {folder.resolve()}")
+        print(f"[INFO] Total gambar: {len(img_files)}")
+        print(f"[INFO] Tekan Q untuk berhenti.\n")
 
-        writer = None
+        writer  = None
         t_start = time.perf_counter()
 
         try:
@@ -472,36 +405,28 @@ class APDInferencePipeline:
                     continue
 
                 self.frame_count += 1
+                elapsed          = time.perf_counter() - t_start
+                self.fps_display = self.frame_count / elapsed if elapsed > 0 else 0
 
-                # Setup VideoWriter dari dimensi frame pertama
                 if save_video and writer is None:
-                    h, w = frame.shape[:2]
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    writer = cv2.VideoWriter(save_video, fourcc, 10, (w, h))
+                    hh, ww = frame.shape[:2]
+                    writer = self._init_writer(save_video, 10, ww, hh)
 
-                elapsed     = time.perf_counter() - t_start
-                fps_display = self.frame_count / elapsed if elapsed > 0 else 0
-
-                # Inference
-                detections = self.run_inference(frame)
-                events     = self.check_violations(detections, frame)
-                vis_frame  = self.draw_detections(frame, detections, events, fps_display)
+                vis = self._process_frame(frame)
 
                 if show_preview:
-                    cv2.imshow("APD Monitor - Folder Mode [Q=quit]", vis_frame)
-                    if cv2.waitKey(30) & 0xFF == ord('q'):
+                    cv2.imshow("APD Monitor - Folder [Q=quit]", vis)
+                    if cv2.waitKey(30) & 0xFF == ord("q"):
                         print("\n[INFO] Dihentikan pengguna.")
                         break
 
                 if writer:
-                    writer.write(vis_frame)
+                    writer.write(vis)
 
-                # Progress
+                total_viol = self.violation_logic.stats["total_events"]
                 print(
-                    f"\r  [{i+1}/{len(img_files)}] "
-                    f"{img_path.name} | "
-                    f"det={len(detections)} | "
-                    f"viol={self.violation_count}   ",
+                    f"\r  [{i+1}/{len(img_files)}] {img_path.name} | "
+                    f"Violations={total_viol}   ",
                     end="", flush=True
                 )
 
@@ -511,57 +436,34 @@ class APDInferencePipeline:
             cv2.destroyAllWindows()
             self._print_summary()
 
-    # ── HELPER ──────────────────────────────────
+    # ────────────────────────────────────────────
+    #  HELPER
+    # ────────────────────────────────────────────
 
-    def _save_screenshot(
-        self,
-        frame: np.ndarray,
-        det:   Detection,
-        dt:    datetime,
-        event_id: str,
-    ) -> str:
-        """Simpan screenshot frame pada saat pelanggaran terjadi."""
-        filename = f"{det.class_name}_{dt.strftime('%Y%m%d_%H%M%S')}.jpg"
-        path     = self.screenshot_dir / filename
+    def _init_writer(self, path, fps, w, h):
+        if not path:
+            return None
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        print(f"[INFO] Simpan video ke: {path}")
+        return cv2.VideoWriter(path, fourcc, fps, (w, h))
 
-        shot = frame.copy()
-        x1, y1, x2, y2 = det.bbox
-        cv2.rectangle(shot, (x1, y1), (x2, y2), (0, 0, 255), 3)
-        cv2.putText(
-            shot,
-            f"VIOLATION: {det.class_name.upper()}",
-            (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
-            (0, 0, 255), 2, cv2.LINE_AA
-        )
-        cv2.putText(
-            shot,
-            dt.strftime("%Y-%m-%d %H:%M:%S"),
-            (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
-            (255, 255, 255), 2, cv2.LINE_AA
-        )
-        cv2.imwrite(str(path), shot)
-        return str(path)
-
-    def _log_event(self, event: ViolationEvent):
-        """Simpan event ke file .jsonl (1 baris = 1 event JSON)."""
-        with open(self.log_file, "a") as f:
-            f.write(json.dumps(asdict(event)) + "\n")
+    def _print_banner(self):
+        print(f"\n{'='*55}")
+        print(f"  APD Inference Pipeline — YOLOv11 + ViolationLogic")
+        print(f"{'='*55}")
 
     def _print_summary(self):
-        """Tampilkan ringkasan setelah selesai."""
         print(f"\n\n{'='*55}")
         print(f"  RINGKASAN INFERENCE")
         print(f"{'='*55}")
         print(f"  Total frame diproses : {self.frame_count}")
-        print(f"  Total pelanggaran    : {self.violation_count}")
         print(f"\n  Deteksi per kelas:")
-        for cls, count in self.class_detection_count.items():
+        for cname, count in self.class_count.items():
             if count > 0:
-                marker = "🚨" if cls in VIOLATION_CLASSES else "✅"
-                print(f"    {marker} {cls:20s}: {count}")
-        print(f"\n  Log pelanggaran : {self.log_file.resolve()}")
-        print(f"  Screenshots     : {self.screenshot_dir.resolve()}")
-        print(f"{'='*55}\n")
+                icon = "🚨" if cname in VIOLATION_CLASSES else "✅"
+                print(f"    {icon} {cname:20s}: {count}x")
+        # Ringkasan violation dari violation_logic.py
+        self.violation_logic.print_session_summary()
 
 
 # ─────────────────────────────────────────────
@@ -570,34 +472,35 @@ class APDInferencePipeline:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Inference YOLOv11 untuk deteksi APD secara real-time.",
+        description="Inference YOLOv11 APD — terintegrasi violation_logic.py",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Contoh:
   python inference.py --source 0
-  python inference.py --source rekaman.mp4 --conf 0.45
+  python inference.py --source rekaman.mp4 --conf 0.45 --skip 2
   python inference.py --source saved_frames/webcam0_20250312/
   python inference.py --source rekaman.mp4 --save-video hasil.mp4 --no-preview
+  python inference.py --source 0 --model models/best.pt --camera-id CAM_AREA_A
         """
     )
     parser.add_argument("--source",     required=True,
-        help="Webcam (0), file video, RTSP URL, atau folder frame")
+        help="0=webcam, file.mp4, rtsp://..., atau folder frame")
     parser.add_argument("--model",      default="yolo11s.pt",
         help="Path model .pt (default: yolo11s.pt, auto-download)")
     parser.add_argument("--conf",       type=float, default=0.45,
         help="Confidence threshold (default: 0.45)")
     parser.add_argument("--iou",        type=float, default=0.45,
         help="IoU threshold NMS (default: 0.45)")
-    parser.add_argument("--device",     default="0",
-        help="Device: '0'=GPU, 'cpu'=CPU (default: 0)")
+    parser.add_argument("--device",     default="cpu",
+        help="'cpu' atau '0' untuk GPU (default: cpu)")
     parser.add_argument("--camera-id",  default="CAM_01",
-        help="ID kamera untuk event log (default: CAM_01)")
+        help="ID kamera untuk log event (default: CAM_01)")
     parser.add_argument("--output",     default="inference_output",
-        help="Folder output screenshots & log (default: inference_output)")
+        help="Folder output violations (default: inference_output)")
     parser.add_argument("--skip",       type=int, default=1,
         help="Proses setiap N frame (default: 1=semua)")
     parser.add_argument("--save-video", type=str, default=None,
-        help="Simpan hasil visualisasi ke file .mp4")
+        help="Simpan output visualisasi ke file .mp4")
     parser.add_argument("--no-preview", action="store_true",
         help="Matikan jendela preview (lebih cepat)")
     return parser.parse_args()
