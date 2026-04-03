@@ -2,7 +2,6 @@ from datetime import datetime
 from typing import Optional
 from database import get_pool
 
-
 async def insert_violation(
     violation_type: str,
     confidence: float,
