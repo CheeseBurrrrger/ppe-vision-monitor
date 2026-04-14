@@ -106,3 +106,43 @@ async def get_stats():
             by_hour=by_hour,
         )
 
+@router.get("/export-csv")
+async def export_violations_csv(
+    violation_type: Optional[ViolationType] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+):
+    """Download semua pelanggaran (yang lolos filter) sebagai CSV."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        query = "SELECT * FROM violations WHERE 1=1"
+        params: list = []
+        idx = 1
+        if violation_type:
+            query += f" AND violation_type = ${idx}"
+            params.append(violation_type)
+            idx += 1
+        if date_from:
+            query += f" AND timestamp >= ${idx}"
+            params.append(datetime.combine(date_from, time.min))
+            idx += 1
+        if date_to:
+            query += f" AND timestamp <= ${idx}"
+            params.append(datetime.combine(date_to, time.max))
+            idx += 1
+        query += " ORDER BY timestamp DESC"
+        rows = await conn.fetch(query, *params)
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(dict(row))
+    buf.seek(0)
+
+    filename = f"violations_{datetime.utcnow():%Y%m%d_%H%M%S}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
