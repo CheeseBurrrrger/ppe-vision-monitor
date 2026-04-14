@@ -2,17 +2,28 @@ import csv
 import io
 from datetime import date, datetime, time
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from database import get_pool
-from schemas import ViolationCreate, ViolationResponse, ViolationStats
+from schemas import (
+    ViolationCreate,
+    ViolationResponse,
+    ViolationStats,
+    ViolationType,
+    default_severity,
+)
+
+CSV_COLUMNS = [
+    "id", "violation_type", "confidence", "severity", "timestamp",
+    "camera_id", "frame_path", "created_at",
+]
 
 router = APIRouter()
 
 @router.get("/violations", response_model=list[ViolationResponse])
 async def get_violations(
-    violation_type: Optional[str] = Query(
-        None, description="Filter by type: no_helmet, no_vest"
+    violation_type: Optional[ViolationType] = Query(
+        None, description="Filter by type"
     ),
     date_from: Optional[date] = Query(None, description="Start date filter"),
     date_to: Optional[date] = Query(None, description="End date filter"),
@@ -50,16 +61,18 @@ async def get_violations(
 @router.post("/violations", response_model=ViolationResponse, status_code=201)
 async def create_violation(violation: ViolationCreate):
     """Record a new violation event."""
+    severity = violation.severity or default_severity(violation.violation_type)
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO violations (violation_type, confidence, timestamp, frame_path, camera_id)
-            VALUES ($1, $2, COALESCE($3, NOW()), $4, $5)
+            INSERT INTO violations (violation_type, confidence, severity, timestamp, frame_path, camera_id)
+            VALUES ($1, $2, $3, COALESCE($4, NOW()), $5, $6)
             RETURNING *
             """,
             violation.violation_type,
             violation.confidence,
+            severity,
             violation.timestamp,
             violation.frame_path,
             violation.camera_id,

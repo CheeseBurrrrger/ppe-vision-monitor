@@ -21,6 +21,7 @@ async def init_db() -> None:
                 id SERIAL PRIMARY KEY,
                 violation_type VARCHAR(50) NOT NULL,
                 confidence FLOAT NOT NULL,
+                severity VARCHAR(20) NOT NULL DEFAULT 'MEDIUM',
                 timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 frame_path VARCHAR(255),
                 camera_id VARCHAR(50) DEFAULT 'default',
