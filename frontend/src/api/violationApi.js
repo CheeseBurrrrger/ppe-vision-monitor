@@ -1,8 +1,8 @@
 import api from './axiosInstance';
 
+// Tidak perlu mendefinisikan API_URL lagi di sini jika sudah ada di axiosInstance
 export const getViolations = async () => {
   try {
-    // Menghubungi endpoint yang telah disiapkan di FastAPI
     const response = await api.get('/violations'); 
     return response.data; 
   } catch (error) {

@@ -10,6 +10,8 @@ const ViolationTable = () => {
   const { data: violations = [], isLoading, isError } = useQuery({
     queryKey: ['violations'],
     queryFn: getViolations,
+    refetchInterval: 3000, // Cek data baru ke backend setiap 3 detik
+    refetchOnWindowFocus: true, // Ambil data baru saat kamu balik ke tab browser ini
   });
 
   // 2. Logika Filtering disesuaikan dengan isi database (lowercase)
