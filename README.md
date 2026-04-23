@@ -3,7 +3,7 @@
 > **PPE Compliance Monitoring System** — Computer Vision-based automatic detection of Personal Protective Equipment (PPE) violations in industrial environments.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)
-![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-00BFFF?style=flat)
+![YOLOv11](https://img.shields.io/badge/YOLOv11-Ultralytics-00BFFF?style=flat)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?style=flat&logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-18+-61DAFB?style=flat&logo=react&logoColor=black)
 ![SQLite](https://img.shields.io/badge/SQLite-3-003B57?style=flat&logo=sqlite&logoColor=white)
@@ -20,7 +20,7 @@ Built as a capstone project in collaboration with **PT Epson Indonesia**, with t
 
 ### What it does
 
-- Detects **helmet** and **safety vest** compliance using YOLOv8n (CPU-compatible)
+- Detects **helmet** and **safety vest** compliance using YOLOv11
 - Generates structured violation events with timestamp and confidence score
 - Stores all events in a local SQLite database
 - Displays violation analytics via a React dashboard (Review Mode)
@@ -39,7 +39,7 @@ Built as a capstone project in collaboration with **PT Epson Indonesia**, with t
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| Detection | YOLOv8n (Ultralytics) | Object detection — helmet, vest, safety boot |
+| Detection | YOLOv11 (Ultralytics) | Object detection — helmet, vest, safety boot |
 | Frame processing | OpenCV | Video/webcam reading, frame extraction |
 | Violation logic | Python (rule-based) | Evaluate detections → generate violation events |
 | Database | SQLite | Local violation event storage |
@@ -59,7 +59,7 @@ ppe-vision-monitor/
 ├── .gitignore
 │
 ├── model/                      # ML/AI — training & export
-│   ├── train.py                # YOLOv8n fine-tuning script
+│   ├── train.py                # YOLOv11 fine-tuning script
 │   ├── evaluate.py             # mAP50, confusion matrix evaluation
 │   ├── export_onnx.py          # Export best.pt → best.onnx
 │   ├── ppe.yaml                # Dataset configuration
@@ -126,7 +126,7 @@ Model weights are not stored in this repository due to file size.
 Download from the shared Google Drive link (ask the team for access):
 
 ```
-/models/best.pt     ← YOLOv8n fine-tuned weights (PyTorch)
+/models/best.pt     ← YOLOv11 fine-tuned weights (PyTorch)
 /models/best.onnx   ← Exported ONNX format (for CPU inference)
 ```
 
@@ -196,7 +196,7 @@ If you want to fine-tune the model from scratch:
 Download a PPE dataset from [Roboflow Universe](https://universe.roboflow.com) with classes:
 `helmet`, `vest`, `safety_boot`, `person`
 
-Export in **YOLOv8 format** and place in:
+Export in **YOLO format** and place in:
 
 ```
 data/
@@ -215,7 +215,10 @@ Update `model/ppe.yaml` with your dataset path and class names.
 ### 2. Run training
 
 ```bash
-# GPU (recommended for training)
+# GPU tercepat (otomatis pilih GPU, mixed precision, autobatch)
+python model/train.py --epochs 100 --imgsz 640
+
+# GPU manual
 python model/train.py --epochs 100 --imgsz 640 --device 0
 
 # CPU only (slow, use only if no GPU available)

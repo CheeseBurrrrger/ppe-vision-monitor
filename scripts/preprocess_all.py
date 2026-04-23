@@ -1,65 +1,59 @@
 import os
-import shutil
 
-# =========================
-# CONFIG
-# =========================
+
 DATASET_PATH = "dataset"
+RAW_LABELS_PATH = os.path.join(DATASET_PATH, "labels")
 SPLITS = ["train", "val", "test"]
+IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"]
 
-# mapping class lama → baru
+# Assumption based on raw labels in dataset/labels:
+# 0=person, 2=helmet, 3=vest, 4=boots, 5=gloves.
 CLASS_MAPPING = {
-    0: 0,  # helmet
-    2: 1,  # vest
-    3: 2,  # boots
-    4: 3   # gloves
+    0: 0,  # person
+    2: 1,  # helmet
+    3: 2,  # vest
+    4: 3,  # boots
+    5: 4,  # gloves
 }
 
-VALID_CLASSES = [0, 1, 2, 3]
+VALID_CLASSES = list(range(5))
 
-# =========================
-# STEP 1: REMOVE MASK + REMAP
-# =========================
+
 def process_labels():
-    print("\n[STEP 1] Remove Mask + Remap")
+    print("\n[STEP 1] Rebuild Labels From Raw + Remap")
 
     for split in SPLITS:
+        image_path = os.path.join(DATASET_PATH, split, "images")
         label_path = os.path.join(DATASET_PATH, split, "labels")
 
-        if not os.path.exists(label_path):
+        if not os.path.exists(image_path) or not os.path.exists(label_path):
             print(f"Skip {split}")
             continue
 
-        for file in os.listdir(label_path):
-            file_path = os.path.join(label_path, file)
-
+        for image_name in os.listdir(image_path):
+            base, _ = os.path.splitext(image_name)
+            raw_label_path = os.path.join(RAW_LABELS_PATH, base + ".txt")
+            output_label_path = os.path.join(label_path, base + ".txt")
             new_lines = []
 
-            with open(file_path, "r") as f:
-                lines = f.readlines()
+            if os.path.exists(raw_label_path):
+                with open(raw_label_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) != 5:
+                            continue
 
-                for line in lines:
-                    parts = line.strip().split()
-                    cls = int(parts[0])
+                        cls = int(parts[0])
+                        if cls in CLASS_MAPPING:
+                            parts[0] = str(CLASS_MAPPING[cls])
+                            new_lines.append(" ".join(parts) + "\n")
 
-                    # hapus mask
-                    if cls == 1:
-                        continue
-
-                    # remap class
-                    if cls in CLASS_MAPPING:
-                        parts[0] = str(CLASS_MAPPING[cls])
-                        new_lines.append(" ".join(parts) + "\n")
-
-            with open(file_path, "w") as f:
+            with open(output_label_path, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
 
-    print("✔ Mask removed & class remapped")
+    print("✔ Raw labels rebuilt and remapped")
 
 
-# =========================
-# STEP 2: REMOVE EMPTY FILES
-# =========================
 def remove_empty():
     print("\n[STEP 2] Remove Empty Labels + Images")
 
@@ -67,7 +61,7 @@ def remove_empty():
         label_path = os.path.join(DATASET_PATH, split, "labels")
         image_path = os.path.join(DATASET_PATH, split, "images")
 
-        if not os.path.exists(label_path):
+        if not os.path.exists(label_path) or not os.path.exists(image_path):
             continue
 
         for file in os.listdir(label_path):
@@ -75,12 +69,10 @@ def remove_empty():
 
             if os.path.getsize(file_path) == 0:
                 print(f"Remove empty: {file}")
-
                 os.remove(file_path)
 
-                # handle jpg/png
                 base = file.replace(".txt", "")
-                for ext in [".jpg", ".png"]:
+                for ext in IMAGE_EXTENSIONS:
                     img_path = os.path.join(image_path, base + ext)
                     if os.path.exists(img_path):
                         os.remove(img_path)
@@ -88,9 +80,6 @@ def remove_empty():
     print("✔ Empty files cleaned")
 
 
-# =========================
-# STEP 3: VALIDATION
-# =========================
 def validate():
     print("\n[STEP 3] Validation Check")
 
@@ -103,10 +92,13 @@ def validate():
             continue
 
         for file in os.listdir(label_path):
-            with open(os.path.join(label_path, file)) as f:
+            with open(os.path.join(label_path, file), "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
-                    cls = int(line.split()[0])
+                    parts = line.split()
+                    if not parts:
+                        continue
 
+                    cls = int(parts[0])
                     if cls not in VALID_CLASSES:
                         print(f"Invalid class {cls} in {file}")
 
@@ -115,29 +107,22 @@ def validate():
     print(f"✔ Checked {total} label files")
 
 
-# =========================
-# STEP 4: DATA SUMMARY
-# =========================
 def summary():
     print("\n[STEP 4] Dataset Summary")
 
     for split in SPLITS:
         img_path = os.path.join(DATASET_PATH, split, "images")
+        lbl_path = os.path.join(DATASET_PATH, split, "labels")
 
-        if not os.path.exists(img_path):
+        if not os.path.exists(img_path) or not os.path.exists(lbl_path):
             continue
 
-        total = len(os.listdir(img_path))
-        print(f"{split}: {total} images")
+        print(f"{split}: {len(os.listdir(img_path))} images, {len(os.listdir(lbl_path))} labels")
 
 
-# =========================
-# MAIN
-# =========================
 if __name__ == "__main__":
     process_labels()
     remove_empty()
     validate()
     summary()
-
     print("\nPREPROCESSING SELESAI")
