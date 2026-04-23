@@ -65,3 +65,6 @@ wandb/
 
 # Docker
 postgres_data/
+
+# Local dataset exports
+dataset/
