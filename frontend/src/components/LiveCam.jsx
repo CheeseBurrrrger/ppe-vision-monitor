@@ -13,8 +13,6 @@ export default function LiveCam() {
   return (
     <div className="flex flex-col h-full space-y-4">
       {/* Header Statis - Tetap di atas */}
-      <div className="bg-[#F2EADA] rounded-xl p-4 flex justify-between items-center border-l-8 border-black shadow-sm shrink-0">
-      </div>
 
       {/* Container Denah - Mengisi sisa layar */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 flex-1 flex flex-col min-h-0 overflow-hidden">

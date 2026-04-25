@@ -10,7 +10,8 @@ const Sidebar = ({ activeMenu, setActiveMenu }) => {
   ];
 
   return (
-    <aside className="w-64 bg-[#F2EADA] border-r border-gray-300 flex flex-col p-6 transition-all">
+    <aside className="w-40 lg:w-48 xl:w-56 flex-shrink-0 bg-[#F2EADA] 
+                  border-r border-gray-300 flex flex-col p-4 transition-all">
       {/* Logo Section */}
       <div className="mb-10">
         <h1 className="text-2xl font-bold tracking-tight text-gray-900">VisionGuard</h1>
