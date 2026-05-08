@@ -27,6 +27,18 @@ export default function LogTable() {
             <td>Spraying Room</td>
           </tr>
         </tbody>
+
+          <tbody>
+          <tr className="border-b hover:bg-gray-50">
+            <td className="py-2">002</td>
+            <td>2026-04-27 09:17:23</td>
+            <td>No Gloves</td>
+            <td>0.87</td>
+            <td>Shift 3</td>
+            <td className="text-blue-500">photo_2.jpg</td>
+            <td>Pipe Store</td>
+          </tr>
+        </tbody>
       </table>
     </div>
   );
