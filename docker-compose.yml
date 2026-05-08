@@ -25,6 +25,9 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       CORS_ORIGINS: ${CORS_ORIGINS}
       SCREENSHOTS_DIR: /data/violations/screenshots
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+      CV_SERVICE_KEY: ${CV_SERVICE_KEY}
     volumes:
       - ${CV_OUTPUT_DIR:-./core/inference_output}:/data:ro
     depends_on:
@@ -32,14 +35,31 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "5173:5173"
-  #   depends_on:
-  #     - backend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  core:
+    build:
+      context: .
+      dockerfile: core/Dockerfile
+    environment:
+      BACKEND_URL: http://backend:8000
+      CV_SERVICE_KEY: ${CV_SERVICE_KEY}
+      WS_PORT: 8765
+    ports:
+      - "8765:8765"
+    volumes:
+      - ${CV_OUTPUT_DIR:-./core/inference_output}:/app/core/inference_output
+    depends_on:
+      - backend
+    restart: unless-stopped
 
 volumes:
   postgres_data:

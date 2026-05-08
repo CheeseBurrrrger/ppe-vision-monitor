@@ -16,8 +16,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 from inference import APDInferencePipeline
 from violation_logic import ViolationLogic
 
-BACKEND_URL = "http://localhost:8000"
-WS_PORT = 8765
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+CV_SERVICE_KEY = os.getenv("CV_SERVICE_KEY", "")
+WS_PORT = int(os.getenv("WS_PORT", "8765"))
 
 pipeline = APDInferencePipeline(
     model_path=os.path.join(os.path.dirname(__file__), '..', 'model', 'best.pt'),
@@ -34,6 +35,7 @@ def get_violation_logic(camera_id):
             camera_id=camera_id,
             output_dir=os.path.join(os.path.dirname(__file__), 'inference_output'),
             backend_url=BACKEND_URL,
+            service_key=CV_SERVICE_KEY,
         )
     return violation_logics[camera_id]
 
