@@ -1,14 +1,45 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Camera, X, RefreshCw } from 'lucide-react';
 
 export default function LiveCam() {
   const [selectedCam, setSelectedCam] = useState(null);
-
+  const [timestamp, setTimestamp] = useState('');
+  const videoRef = useRef(null);
   const cameras = [
     { id: 1, name: 'Spraying Room', top: '40%', left: '35%' },
     { id: 2, name: 'Pipe Store', top: '70%', left: '32%' },
     { id: 3, name: 'Console Area', top: '80%', left: '65%' },
   ];
+  useEffect(() => {
+    if (selectedCam) {
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+          }
+        })
+        .catch(err => console.error("Camera access error:", err));
+    }
+    
+
+    // Cleanup: stop the stream when modal closes
+    return () => {
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [selectedCam]);
+  useEffect(() => {
+      if (!selectedCam) return;
+      const tick = () => setTimestamp(new Date().toLocaleString('id-ID', {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+      }).replace(/\//g, '-'));
+      tick();
+      const interval = setInterval(tick, 1000);
+      return () => clearInterval(interval);
+    }, [selectedCam]);
 
   return (
     <div className="flex flex-col h-full space-y-4">
@@ -74,10 +105,16 @@ export default function LiveCam() {
             </div>
             <div className="bg-black aspect-video relative">
               <div className="absolute top-4 left-4 z-10 flex flex-col gap-1">
-                <div className="bg-black/50 text-white text-[10px] px-2 py-1 rounded font-mono">07-04-2026 09:12:43</div>
+                <div className="bg-black/50 text-white text-[10px] px-2 py-1 rounded font-mono">{timestamp}</div>
                 <div className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold uppercase w-fit animate-pulse">Live</div>
               </div>
-              <img src="https://images.unsplash.com/photo-1557597774-9d2739f85a76?w=1200" className="w-full h-full object-cover" alt="stream" />
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-cover"
+              />
             </div>
           </div>
         </div>

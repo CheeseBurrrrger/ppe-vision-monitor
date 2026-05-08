@@ -47,11 +47,9 @@ except ImportError:
 
 CLASS_NAMES = {
     0: "helmet",
-    1: "no_helmet",
-    2: "vest",
-    3: "no_vest",
-    4: "safety_boot",
-    5: "no_safety_boot",
+    1: "vest", 
+    2: "boots",
+    3: "gloves",
 }
 
 # Warna bounding box per kelas (BGR)
