@@ -45,23 +45,29 @@ DEFAULT_RESIZE      = None             # None = ukuran asli. Contoh: (640, 480)
 def open_source(source):
     """
     Buka sumber video. Otomatis deteksi tipe:
-      - Integer (0, 1, 2) → webcam
-      - String angka ("0") → webcam
-      - Path file          → file video lokal
-      - String rtsp://...  → kamera IP / RTSP
+      - Integer (0, 1, 2)      → webcam lokal
+      - String angka ("0")     → webcam lokal
+      - Path file              → file video lokal
+      - String rtsp://...      → kamera IP / RTSP
+      - String http://...      → IP Webcam (Android) / HTTP stream
     """
-    # Konversi ke int jika source adalah angka (webcam index)
     if isinstance(source, str) and source.isdigit():
         source = int(source)
 
     if isinstance(source, int):
         print(f"[INFO] Membuka webcam index {source} ...")
         cap = cv2.VideoCapture(source)
+
     elif isinstance(source, str) and source.lower().startswith("rtsp://"):
         print(f"[INFO] Membuka RTSP stream: {source}")
-        # CAP_FFMPEG lebih stabil untuk RTSP
         cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+
+    elif isinstance(source, str) and source.lower().startswith("http://"):
+        print(f"[INFO] Membuka HTTP stream (IP Webcam): {source}")
+        cap = cv2.VideoCapture(source)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # buffer kecil = latency rendah
+
     else:
         print(f"[INFO] Membuka file video: {source}")
         cap = cv2.VideoCapture(source)
@@ -72,12 +78,13 @@ def open_source(source):
             "Pastikan:\n"
             "  - Index webcam benar (coba 0, 1, 2)\n"
             "  - Path file video ada dan tidak typo\n"
-            "  - URL RTSP benar dan kamera online\n"
+            "  - URL RTSP/HTTP benar dan kamera online\n"
+            "  - HP dan laptop satu jaringan WiFi\n"
+            "  - App IP Webcam sudah di-Start Server\n"
             "  - Driver kamera / codec video terinstall"
         )
 
     return cap
-
 
 def get_video_info(cap):
     """Ambil metadata video dari objek VideoCapture."""
