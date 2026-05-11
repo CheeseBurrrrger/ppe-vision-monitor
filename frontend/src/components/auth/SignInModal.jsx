@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
 
-export default function SignInModal({ onClose }) {
+export default function SignInModal({ onClose, onSuccess }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const overlayRef = useRef(null);
 
   // Close on Escape key
@@ -21,8 +23,13 @@ export default function SignInModal({ onClose }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    // TODO: hubungkan ke endpoint registrasi backend
-    console.log("Sign In payload:", { username, password });
+    setError("");
+    setLoading(true);
+    // TODO: ganti dengan API call ke backend
+    setTimeout(() => {
+      setLoading(false);
+      onSuccess();
+    }, 500);
   };
 
   return (
@@ -31,7 +38,9 @@ export default function SignInModal({ onClose }) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm px-4"
       onClick={handleOverlayClick}
     >
-      <div className="w-full max-w-sm bg-[#F5EFE0] rounded-2xl overflow-hidden shadow-xl border border-black/10 animate-fade-in">
+      <div 
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-sm bg-[#F5EFE0] rounded-2xl overflow-hidden shadow-xl border border-black/10 animate-fade-in">
         {/* Card Header */}
         <div className="px-6 py-4 border-b border-black/10">
           <p className="text-sm font-bold text-[#1a1a1a]">VisionGuard</p>
@@ -94,11 +103,21 @@ export default function SignInModal({ onClose }) {
           </div>
 
           {/* Submit */}
+
           <button
             type="submit"
-            className="w-full py-2.5 rounded-lg bg-green-700 hover:bg-green-800 active:scale-[0.98] text-white text-sm font-semibold transition-all duration-150"
+            disabled={loading}
+            className="w-full py-2.5 rounded-lg bg-green-700 hover:bg-green-800 active:scale-[0.98] disabled:opacity-60 text-white text-sm font-semibold transition-all duration-150 flex items-center justify-center gap-2"
           >
-            Sign In
+            {loading ? (
+              <>
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+                Memproses...
+              </>
+            ) : "Sign In"}
           </button>
 
           {/* Forgot + Back */}

@@ -13,7 +13,7 @@ const api = axios.create({
   baseURL: "http://localhost:8000",
 });
 
-export default function Dashboard() {
+export default function Dashboard({ onLogout }) {
   const [activeMenu, setActiveMenu] = useState("Dashboard");
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -38,7 +38,7 @@ export default function Dashboard() {
 
   return (
     <div className="flex h-screen bg-[#E5DCC5] overflow-hidden">
-      <Sidebar activeMenu={activeMenu} setActiveMenu={setActiveMenu} />
+      <Sidebar activeMenu={activeMenu} setActiveMenu={setActiveMenu} onLogout={onLogout} />
 
       <div className="flex-1 flex flex-col min-h-0">
         <Header />

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 
-export default function LoginModal({ onClose }) {
+export default function LoginModal({ onClose, onSuccess }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -8,7 +8,6 @@ export default function LoginModal({ onClose }) {
   const [error, setError] = useState("");
   const overlayRef = useRef(null);
 
-  // Close on Escape key
   useEffect(() => {
     const handleKey = (e) => {
       if (e.key === "Escape") onClose();
@@ -17,58 +16,52 @@ export default function LoginModal({ onClose }) {
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose]);
 
+  // ← Klik overlay hanya tutup jika klik TEPAT di overlay, bukan di dalam modal
   const handleOverlayClick = (e) => {
     if (e.target === overlayRef.current) onClose();
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
     setError("");
     setLoading(true);
-    try {
-      // TODO: hubungkan ke endpoint login backend, contoh:
-      // const res = await api.post("/auth/login", { username, password });
-      // if (res.data.token) { /* simpan token, redirect ke dashboard */ }
-      console.log("Login payload:", { username, password });
-    } catch (err) {
-      setError("Username atau password salah. Coba lagi.");
-    } finally {
+    // TODO: ganti dengan API call ke backend
+    setTimeout(() => {
       setLoading(false);
-    }
+      onSuccess();
+    }, 500);
   };
 
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm px-4"
       onClick={handleOverlayClick}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm px-4"
     >
-      <div className="w-full max-w-sm bg-[#F5EFE0] rounded-2xl overflow-hidden shadow-xl border border-black/10 animate-fade-in">
-        {/* Card Header */}
+      {/* Modal — stopPropagation agar klik di dalam tidak nutup overlay */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-sm bg-[#F5EFE0] rounded-2xl overflow-hidden shadow-xl border border-black/10"
+      >
+        {/* Header */}
         <div className="px-6 py-4 border-b border-black/10">
           <p className="text-sm font-bold text-[#1a1a1a]">VisionGuard</p>
           <p className="text-xs text-gray-500">K3 Monitoring</p>
           <p className="text-xs text-gray-400">PT. Epson Indonesia</p>
         </div>
 
-        {/* Card Body */}
+        {/* Body */}
         <form onSubmit={handleSubmit} className="px-6 py-6 space-y-4">
-          <h2 className="text-3xl font-light text-[#1a1a1a] tracking-tight">
-            Login
-          </h2>
+          <h2 className="text-3xl font-light text-[#1a1a1a] tracking-tight">Login</h2>
 
-          {/* Error message */}
           {error && (
             <div className="px-3 py-2 rounded-md bg-red-50 border border-red-200 text-xs text-red-600">
               {error}
             </div>
           )}
 
-          {/* Username */}
           <div className="space-y-1">
-            <label className="text-xs font-medium text-gray-600">
-              Username
-            </label>
+            <label className="text-xs font-medium text-gray-600">Username</label>
             <input
               type="text"
               value={username}
@@ -79,11 +72,8 @@ export default function LoginModal({ onClose }) {
             />
           </div>
 
-          {/* Password */}
           <div className="space-y-1">
-            <label className="text-xs font-medium text-gray-600">
-              Password
-            </label>
+            <label className="text-xs font-medium text-gray-600">Password</label>
             <div className="relative">
               <input
                 type={showPassword ? "text" : "password"}
@@ -95,8 +85,8 @@ export default function LoginModal({ onClose }) {
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
                 tabIndex={-1}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
               >
                 {showPassword ? (
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
@@ -112,7 +102,6 @@ export default function LoginModal({ onClose }) {
             </div>
           </div>
 
-          {/* Submit */}
           <button
             type="submit"
             disabled={loading}
@@ -126,12 +115,9 @@ export default function LoginModal({ onClose }) {
                 </svg>
                 Memproses...
               </>
-            ) : (
-              "Login"
-            )}
+            ) : "Login"}
           </button>
 
-          {/* Forgot + Back */}
           <div className="flex items-center justify-between pt-1">
             <button
               type="button"
@@ -143,16 +129,13 @@ export default function LoginModal({ onClose }) {
               </svg>
               Kembali
             </button>
-            <button
-              type="button"
-              className="text-xs text-gray-500 hover:text-gray-700 transition-colors"
-            >
+            <button type="button" className="text-xs text-gray-500 hover:text-gray-700 transition-colors">
               Forgot Password?
             </button>
           </div>
         </form>
 
-        {/* Card Footer */}
+        {/* Footer */}
         <div className="px-6 py-3 border-t border-black/10">
           <p className="text-[11px] text-gray-400">©team sembilan</p>
         </div>
