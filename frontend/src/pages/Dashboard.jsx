@@ -8,6 +8,7 @@ import FilterBar from "../components/FilterBar";
 import LogTable from "../components/LogTable";
 import LiveCam from "../components/LiveCam";
 import DashboardCamFeed from "../components/DashboardCamFeed";
+import RekapPegawai from "../components/RekapPegawai";
 
 const api = axios.create({
   baseURL: "http://localhost:8000",
@@ -92,6 +93,7 @@ export default function Dashboard({ onLogout }) {
               <LogTable />
             </div>
           )}
+          {activeMenu === "Rekap Pegawai" && <RekapPegawai />}
 
           {/* Tentang Sistem */}
           {activeMenu === "Tentang Sistem" && (

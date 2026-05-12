@@ -1,15 +1,16 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { LayoutDashboard, Video, ClipboardList, Info, LogOut, User, ChevronUp } from 'lucide-react';
+import { LayoutDashboard, Video, ClipboardList, Info, LogOut, User, ChevronUp, Users } from 'lucide-react';
 
 const Sidebar = ({ activeMenu, setActiveMenu, onLogout }) => {
   const [showProfile, setShowProfile] = useState(false);
   const profileRef = useRef(null);
 
   const menuItems = [
-    { id: 'Dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-    { id: 'Live Cam', icon: Video, label: 'Live Cam' },
-    { id: 'Log Pelanggaran', icon: ClipboardList, label: 'Log Pelanggaran' },
-    { id: 'Tentang Sistem', icon: Info, label: 'Tentang Sistem' },
+    { id: 'Dashboard',       icon: LayoutDashboard, label: 'Dashboard' },
+    { id: 'Live Cam',        icon: Video,           label: 'Live Cam' },
+    { id: 'Log Pelanggaran', icon: ClipboardList,   label: 'Log Pelanggaran' },
+    { id: 'Rekap Pegawai',   icon: Users,           label: 'Pelanggaran Pegawai' },
+    { id: 'Tentang Sistem',  icon: Info,            label: 'Tentang Sistem' },
   ];
 
   // Tutup popup jika klik di luar
