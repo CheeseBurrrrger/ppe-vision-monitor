@@ -91,8 +91,9 @@ async def handle(websocket):
             print(f"[WS] Error: {e}")
 
 async def main():
-    print(f"[WS] Starting server on ws://localhost:{WS_PORT}")
-    async with websockets.serve(handle, "localhost", WS_PORT):
+    host = os.getenv("WS_HOST", "0.0.0.0")
+    print(f"[WS] Starting server on ws://{host}:{WS_PORT}")
+    async with websockets.serve(handle, host, WS_PORT):
         await asyncio.Future()
 
 if __name__ == "__main__":
