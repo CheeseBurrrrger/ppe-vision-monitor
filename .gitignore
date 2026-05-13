@@ -69,3 +69,6 @@ postgres_data/
 inference_output/
 dummy.py
 .claude
+
+# Local dataset exports
+dataset/
