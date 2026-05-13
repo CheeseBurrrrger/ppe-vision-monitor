@@ -65,3 +65,7 @@ wandb/
 
 # Docker
 postgres_data/
+
+inference_output/
+dummy.py
+.claude
