@@ -26,6 +26,15 @@ async def init_db() -> None:
             );
         """)
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS pegawai (
+                id SERIAL PRIMARY KEY,
+                employee_code VARCHAR(20) UNIQUE NOT NULL,
+                nama VARCHAR(150) NOT NULL,
+                divisi VARCHAR(100),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS violations (
                 id SERIAL PRIMARY KEY,
                 violation_type VARCHAR(50) NOT NULL,
@@ -38,7 +47,8 @@ async def init_db() -> None:
                 status VARCHAR(20) NOT NULL DEFAULT 'pending',
                 validated_by INTEGER REFERENCES users(id),
                 validated_at TIMESTAMPTZ,
-                notes TEXT
+                notes TEXT,
+                pegawai_id INTEGER REFERENCES pegawai(id)
             );
         """)
         # Add new columns if upgrading from older schema
@@ -47,6 +57,7 @@ async def init_db() -> None:
             "ALTER TABLE violations ADD COLUMN IF NOT EXISTS validated_by INTEGER REFERENCES users(id)",
             "ALTER TABLE violations ADD COLUMN IF NOT EXISTS validated_at TIMESTAMPTZ",
             "ALTER TABLE violations ADD COLUMN IF NOT EXISTS notes TEXT",
+            "ALTER TABLE violations ADD COLUMN IF NOT EXISTS pegawai_id INTEGER REFERENCES pegawai(id)",
         ]:
             await conn.execute(col_sql)
         await conn.execute("""

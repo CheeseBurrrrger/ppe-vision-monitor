@@ -30,6 +30,7 @@ services:
       CV_SERVICE_KEY: ${CV_SERVICE_KEY}
     volumes:
       - ${CV_OUTPUT_DIR:-./core/inference_output}:/data:ro
+      - ./scripts:/app/scripts:ro
     depends_on:
       db:
         condition: service_healthy
