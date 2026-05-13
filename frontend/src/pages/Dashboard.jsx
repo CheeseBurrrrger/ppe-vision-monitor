@@ -74,14 +74,8 @@ export default function Dashboard({ onLogout }) {
                 <h2 className="text-sm font-bold text-gray-700 uppercase tracking-widest">
                   Live Camera
                 </h2>
-                <DashboardCamFeed
-                  label="Ruang Produksi 1"
-                  deviceId="cd26da961a3c7ffe3c204755330cd0e6469921a3d39d50d69ce998faa0e4fd45"
-                />
-                <DashboardCamFeed
-                  label="Ruang Produksi 2"
-                  deviceId="31bc7ee16159013aa8efd2712f5f4824df9b62e3c1aaa208297860b056e22f3a"
-                />
+                <DashboardCamFeed label="Ruang Produksi 1" cameraIndex={0} />
+                <DashboardCamFeed label="Ruang Produksi 2" cameraIndex={1} />
               </div>
             </div>
           )}
