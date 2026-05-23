@@ -1,17 +1,21 @@
 import React, { useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Header from "../components/Header";
-import StatsOverview from "../components/StatsOverview"; // Komponen baru
+import {StatsOverview} from "../components/StatsOverview"; // Komponen baru
 import ChartsSection from "../components/ChartsSection"; // Komponen baru
+import { LogTable } from '../components/LogTable';
 import FilterBar from "../components/FilterBar";
-import LogTable from "../components/LogTable";
+// import LogTable from "../components/LogTable";
 import LiveCam from "../components/LiveCam";
 import DashboardCamFeed from "../components/DashboardCamFeed";
+
 
 
 export default function Dashboard() {
   // State untuk melacak menu mana yang aktif
   const [activeMenu, setActiveMenu] = useState("Dashboard");
+  const [filters, setFilters] = useState({ type: "", dateFrom: "", dateTo: "" });
+
 
 return (
     <div className="flex h-screen bg-[#E5DCC5] overflow-hidden">
@@ -45,8 +49,8 @@ return (
           
           {activeMenu === "Log Pelanggaran" && (
             <div className="space-y-4"> {/* Tambahkan wrapper div agar rapi */}
-              <FilterBar />
-              <LogTable />
+              <FilterBar onFilterChange={setFilters} />
+              <LogTable filters={filters} />
             </div>
           )}
 

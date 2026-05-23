@@ -1,8 +1,27 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { getViolations } from '../../api/violationApi';
+import { getViolations } from '../api/violationApi';
 import { CSVLink } from 'react-csv';
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL;
+
+export const fetchStats = async () => {
+  const res = await fetch(`${API_BASE}/stats`);
+  if (!res.ok) throw new Error("Failed to fetch stats");
+  return res.json();
+};
+
+export const fetchViolations = async ({ type, dateFrom, dateTo, limit, offset }) => {
+  const params = new URLSearchParams();
+  if (type && type !== "All") params.append("violation_type", type);
+  if (dateFrom) params.append("date_from", dateFrom);
+  if (dateTo) params.append("date_to", dateTo);
+  if (limit) params.append("limit", limit);
+  if (offset) params.append("offset", offset);
+  const res = await fetch(`${API_BASE}/violations?${params.toString()}`);
+  if (!res.ok) throw new Error("Failed to fetch violations");
+  return res.json();
+};
 const ViolationTable = () => {
   const [filterType, setFilterType] = useState('All');
 

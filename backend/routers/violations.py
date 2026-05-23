@@ -100,12 +100,29 @@ async def get_stats():
         )
         by_hour = [{"hour": row["hour"], "count": row["count"]} for row in hour_rows]
 
+        day_rows = await conn.fetch(
+            """
+            SELECT
+                DATE(timestamp)                          AS date,
+                SUM(CASE WHEN violation_type = 'no_helmet'  THEN 1 ELSE 0 END) AS no_helmet,
+                SUM(CASE WHEN violation_type = 'no_vest'    THEN 1 ELSE 0 END) AS no_vest,
+                SUM(CASE WHEN violation_type = 'no_boots'   THEN 1 ELSE 0 END) AS no_boots,
+                SUM(CASE WHEN violation_type = 'no_gloves'  THEN 1 ELSE 0 END) AS no_gloves,
+                SUM(CASE WHEN violation_type = 'no_goggles' THEN 1 ELSE 0 END) AS no_goggles
+            FROM violations
+            WHERE timestamp >= NOW() - INTERVAL '7 days'
+            GROUP BY DATE(timestamp)
+            ORDER BY date
+            """
+        )
+        by_day = [dict(row) for row in day_rows]
+
         return ViolationStats(
             total_violations=total or 0,
             by_type=by_type,
             by_hour=by_hour,
+            by_day=by_day,
         )
-
 @router.get("/export-csv")
 async def export_violations_csv(
     violation_type: Optional[ViolationType] = Query(None),
