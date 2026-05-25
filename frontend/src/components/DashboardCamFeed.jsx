@@ -1,141 +1,116 @@
 import { useEffect, useRef, useState } from "react";
 
-const WS_URL = "ws://localhost:8765";
-const FRAME_INTERVAL_MS = 1000; // 1 fps to keep CPU/network low
-
-export default function DashboardCamFeed({ label, deviceId, cameraIndex = 0, cameraId }) {
+export default function DashboardCamFeed({ label, deviceId }) {
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);
+  const captureCanvasRef = useRef(null);  // hidden, for sending frames
+  const overlayCanvasRef = useRef(null);  // visible, for drawing boxes
   const wsRef = useRef(null);
-  const sendIntervalRef = useRef(null);
-  const [timestamp, setTimestamp] = useState("");
-  const [error, setError] = useState("");
-  const [detections, setDetections] = useState([]);
-  const [violationCount, setViolationCount] = useState(0);
+  const intervalRef = useRef(null);
+  const [timestamp, setTimestamp] = useState('');
+  const [violations, setViolations] = useState([]);
 
-  // Camera setup
+  // Start camera
   useEffect(() => {
-    let stream;
-    let cancelled = false;
-
-    async function start() {
-      try {
-        if (deviceId) {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { deviceId: { exact: deviceId } },
-          });
-        } else {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const cams = devices.filter((d) => d.kind === "videoinput");
-          if (cams.length === 0) throw new Error("Tidak ada kamera terdeteksi");
-          const cam = cams[Math.min(cameraIndex, cams.length - 1)];
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: cam.deviceId ? { deviceId: { exact: cam.deviceId } } : true,
-          });
-        }
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
+    navigator.mediaDevices.getUserMedia({
+      video: deviceId ? { deviceId: { exact: deviceId } } : true
+    })
+      .then(stream => {
         if (videoRef.current) videoRef.current.srcObject = stream;
-      } catch (err) {
-        console.error(`[${label}] Cam error:`, err);
-        setError(err.message || "Tidak dapat mengakses kamera");
-      }
-    }
+      })
+      .catch(err => console.error("Cam error:", err));
 
-    start();
     return () => {
-      cancelled = true;
-      if (videoRef.current?.srcObject) {
-        videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
-      }
-      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (videoRef.current?.srcObject)
+        videoRef.current.srcObject.getTracks().forEach(t => t.stop());
     };
-  }, [deviceId, cameraIndex, label]);
+  }, []);
 
-  // WebSocket connection + frame sending loop
   useEffect(() => {
-    const camId = cameraId || `CAM_${label.replace(/\s+/g, "_").toUpperCase()}`;
-    let reconnectTimer = null;
-    let closed = false;
+    const ws = new WebSocket("ws://localhost:8765");
+    wsRef.current = ws;
 
-    const connect = () => {
-      try {
-        const ws = new WebSocket(WS_URL);
-        wsRef.current = ws;
+    ws.onopen = () => {
+      console.log("[WS] Connected");
+      intervalRef.current = setInterval(() => {
+        const video = videoRef.current;
+        const canvas = captureCanvasRef.current;
+        if (!video || !canvas || video.readyState < 2 || ws.readyState !== WebSocket.OPEN) return;
 
-        ws.onopen = () => {
-          console.log(`[${label}] WS connected`);
-        };
+        canvas.width = 640;
+        canvas.height = 480;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0, 640, 480);
+        const base64 = canvas.toDataURL("image/jpeg", 0.6).split(",")[1];
 
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            setDetections(data.detections || []);
-            if (data.violations && data.violations.length > 0) {
-              setViolationCount((c) => c + data.violations.length);
-            }
-          } catch (e) {
-            console.error("[WS] parse error", e);
-          }
-        };
+        ws.send(JSON.stringify({ camera_id: label, frame: base64 }));
+      }, 500);
+    };
 
-        ws.onerror = (e) => console.warn(`[${label}] WS error`, e);
-        ws.onclose = () => {
-          if (closed) return;
-          // try reconnect after 3s
-          reconnectTimer = setTimeout(connect, 3000);
-        };
-      } catch (e) {
-        console.error("WS connect error", e);
+    ws.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      drawBoxes(data.detections || []);
+
+      if (data.violations?.length > 0) {
+        setViolations(data.violations);
+        setTimeout(() => setViolations([]), 5000);
       }
     };
 
-    connect();
-
-    // Frame capture + send loop
-    sendIntervalRef.current = setInterval(() => {
-      const video = videoRef.current;
-      const ws = wsRef.current;
-      if (!video || !ws || ws.readyState !== WebSocket.OPEN) return;
-      if (video.videoWidth === 0 || video.videoHeight === 0) return;
-
-      let canvas = canvasRef.current;
-      if (!canvas) {
-        canvas = document.createElement("canvas");
-        canvasRef.current = canvas;
-      }
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
-      const base64 = dataUrl.split(",")[1];
-
-      ws.send(JSON.stringify({ camera_id: camId, frame: base64 }));
-    }, FRAME_INTERVAL_MS);
+    ws.onerror = (e) => console.error("[WS] Error:", e);
+    ws.onclose = () => clearInterval(intervalRef.current);
 
     return () => {
-      closed = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (sendIntervalRef.current) clearInterval(sendIntervalRef.current);
-      if (wsRef.current) wsRef.current.close();
+      clearInterval(intervalRef.current);
+      ws.close();
     };
-  }, [label, cameraId]);
+  }, []);
+
+  const drawBoxes = (detections) => {
+    const video = videoRef.current;
+    const canvas = overlayCanvasRef.current;
+    if (!canvas || !video) return;
+
+    canvas.width = video.clientWidth;
+    canvas.height = video.clientHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const scaleX = canvas.width / 640;
+    const scaleY = canvas.height / 480;
+
+    detections.forEach(det => {
+      const [x1, y1, x2, y2] = det.bbox;
+      const isViolation = det.class.startsWith("no_");
+      let color = isViolation ? "#FF0000" : "#00CC00";
+      
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x1 * scaleX, y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
+
+      const labelText = `${det.class} ${det.confidence}`;
+      ctx.fillStyle = color;
+      ctx.fillRect(x1 * scaleX, y1 * scaleY - 20, labelText.length * 7 + 8, 20);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "12px monospace";
+      ctx.fillText(labelText, x1 * scaleX + 4, y1 * scaleY - 5);
+      // let color;
+      if (det.class === "Person") {
+        color = "#2196F3";        
+      } else if (det.class.startsWith("no_")) {
+        color = "#FF0000";        // red for violation
+      } else {
+        color = "#00CC00";        // green for compliant PPE
+      }
+    });
+  };
 
   // Clock
   useEffect(() => {
-    const tick = () =>
-      setTimestamp(
-        new Date()
-          .toLocaleString("id-ID", {
-            day: "2-digit", month: "2-digit", year: "numeric",
-            hour: "2-digit", minute: "2-digit", second: "2-digit",
-            hour12: false,
-          })
-          .replace(/\//g, "-")
-      );
+    const tick = () => setTimestamp(new Date().toLocaleString('id-ID', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    }).replace(/\//g, '-'));
     tick();
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
@@ -144,13 +119,23 @@ export default function DashboardCamFeed({ label, deviceId, cameraIndex = 0, cam
   return (
     <div className="bg-white rounded-xl overflow-hidden shadow-sm border border-gray-200">
       <div className="relative bg-black aspect-video">
-        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center text-white text-xs text-center p-4 bg-black/60">
-            {error}
-          </div>
-        )}
-        <div className="absolute top-2 left-2 flex flex-col gap-1">
+        <video
+          ref={videoRef}
+          autoPlay playsInline muted
+          className="w-full h-full object-cover"
+        />
+
+        {/* Hidden capture canvas */}
+        <canvas ref={captureCanvasRef} className="hidden" />
+
+        {/* Visible overlay canvas for boxes */}
+        <canvas
+          ref={overlayCanvasRef}
+          className="absolute inset-0 w-full h-full"
+          style={{ pointerEvents: 'none' }}
+        />
+
+        <div className="absolute top-2 left-2 flex flex-col gap-1 z-10">
           <div className="bg-black/50 text-white text-[10px] px-2 py-0.5 rounded font-mono">
             {timestamp}
           </div>
@@ -158,19 +143,15 @@ export default function DashboardCamFeed({ label, deviceId, cameraIndex = 0, cam
             Live
           </div>
         </div>
-        {detections.length > 0 && (
-          <div className="absolute top-2 right-2 bg-black/60 text-white text-[10px] px-2 py-0.5 rounded font-mono">
-            {detections.length} obj
+
+        {violations.length > 0 && (
+          <div className="absolute bottom-2 left-2 right-2 bg-red-600/90 text-white text-xs px-2 py-1 rounded font-bold z-10">
+            ⚠ {violations.map(v => v.type.replace(/_/g, ' ').toUpperCase()).join(', ')}
           </div>
         )}
       </div>
-      <div className="p-3 flex justify-between items-center">
+      <div className="p-3">
         <p className="text-sm font-semibold text-gray-800">{label}</p>
-        {violationCount > 0 && (
-          <span className="text-xs font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded-full">
-            {violationCount} pelanggaran
-          </span>
-        )}
       </div>
     </div>
   );

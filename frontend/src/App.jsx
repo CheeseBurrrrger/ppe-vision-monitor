@@ -1,22 +1,28 @@
-import { useState } from "react";
-import AuthLanding from "./pages/AuthLanding";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 
+function ProtectedRoute({ children }) {
+  const token = localStorage.getItem("access_token");
+  if (!token) return <Navigate to="/login" replace />;
+  return children;
+}
+
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(
-    Boolean(localStorage.getItem("access_token"))
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Navigate to="/login" />} />
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/dashboard"
+          element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
   );
-
-  const handleLogout = () => {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("role");
-    localStorage.removeItem("username");
-    setIsAuthenticated(false);
-  };
-
-  if (!isAuthenticated) {
-    return <AuthLanding onSuccess={() => setIsAuthenticated(true)} />;
-  }
-
-  return <Dashboard onLogout={handleLogout} />;
 }

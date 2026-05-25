@@ -31,7 +31,6 @@ async def get_violations(
     date_to: Optional[date] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    _user: dict = Depends(get_current_user),
 ):
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -64,7 +63,6 @@ async def create_violation(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     is_service: bool = Depends(verify_service_key),
 ):
-    """Manager (JWT) atau CV core (X-Service-Key) dapat mencatat pelanggaran."""
     if not is_service:
         if credentials is None:
             raise HTTPException(status_code=401, detail="Autentikasi diperlukan")
@@ -99,7 +97,6 @@ async def validate_violation(
     body: ValidateViolationRequest,
     manager: dict = Depends(require_manager),
 ):
-    """Manager memvalidasi atau mendismiss pelanggaran yang dicatat oleh sistem."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -125,7 +122,7 @@ async def validate_violation(
 
 
 @router.get("/stats", response_model=ViolationStats)
-async def get_stats(_user: dict = Depends(get_current_user)):
+async def get_stats():
     pool = await get_pool()
     async with pool.acquire() as conn:
         total = await conn.fetchval("SELECT COUNT(*) FROM violations")
@@ -138,7 +135,30 @@ async def get_stats(_user: dict = Depends(get_current_user)):
             "FROM violations GROUP BY hour ORDER BY hour"
         )
         by_hour = [{"hour": row["hour"], "count": row["count"]} for row in hour_rows]
-        return ViolationStats(total_violations=total or 0, by_type=by_type, by_hour=by_hour)
+
+        day_rows = await conn.fetch(
+            """
+            SELECT
+                DATE(timestamp)                          AS date,
+                SUM(CASE WHEN violation_type = 'no_helmet'  THEN 1 ELSE 0 END) AS no_helmet,
+                SUM(CASE WHEN violation_type = 'no_vest'    THEN 1 ELSE 0 END) AS no_vest,
+                SUM(CASE WHEN violation_type = 'no_boots'   THEN 1 ELSE 0 END) AS no_boots,
+                SUM(CASE WHEN violation_type = 'no_gloves'  THEN 1 ELSE 0 END) AS no_gloves,
+                SUM(CASE WHEN violation_type = 'no_goggles' THEN 1 ELSE 0 END) AS no_goggles
+            FROM violations
+            WHERE timestamp >= NOW() - INTERVAL '7 days'
+            GROUP BY DATE(timestamp)
+            ORDER BY date
+            """
+        )
+        by_day = [dict(row) for row in day_rows]
+
+        return ViolationStats(
+            total_violations=total or 0,
+            by_type=by_type,
+            by_hour=by_hour,
+            by_day=by_day,
+        )
 
 
 @router.get("/export-csv")
@@ -146,7 +166,6 @@ async def export_violations_csv(
     violation_type: Optional[ViolationType] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
-    _user: dict = Depends(get_current_user),
 ):
     pool = await get_pool()
     async with pool.acquire() as conn:
