@@ -6,9 +6,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Build context is the project root
+# Layer 1 — heavy deps (torch, torchvision) cached unless requirements.txt changes
+# CPU-only wheels are ~280MB vs ~2GB for CUDA builds
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir torch torchvision \
+    --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY core/ ./core/
 COPY model/ ./model/
