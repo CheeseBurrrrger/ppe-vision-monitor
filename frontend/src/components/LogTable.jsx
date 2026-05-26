@@ -5,7 +5,7 @@ import { useState, useEffect } from "react";
 
 const PAGE_SIZE = 20;
  
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
 const VIOLATION_OPTIONS = [
   { value: "All",        label: "Semua Pelanggaran" },

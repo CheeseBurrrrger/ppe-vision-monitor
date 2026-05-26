@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getViolations } from '../api/violationApi';
 import { CSVLink } from 'react-csv';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL;
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
 export const fetchStats = async () => {
   const res = await fetch(`${API_BASE}/stats`);

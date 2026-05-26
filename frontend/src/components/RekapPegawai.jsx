@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import DetailPegawai from "./DetailPegawai";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
 export default function RekapPegawai() {
   const [selected, setSelected] = useState(null);
