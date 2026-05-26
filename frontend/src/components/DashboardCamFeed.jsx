@@ -11,6 +11,11 @@ export default function DashboardCamFeed({ label, deviceId }) {
 
   // Start camera
   useEffect(() => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      console.warn("Camera unavailable (HTTPS required on non-localhost)");
+      return;
+    }
+
     navigator.mediaDevices.getUserMedia({
       video: deviceId ? { deviceId: { exact: deviceId } } : true
     })
@@ -26,7 +31,8 @@ export default function DashboardCamFeed({ label, deviceId }) {
   }, []);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8765");
+    const wsUrl = import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:8765`;
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
