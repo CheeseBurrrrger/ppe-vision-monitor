@@ -75,20 +75,11 @@ except ImportError:
 # ─────────────────────────────────────────────
 
 CLASS_COLORS = {
-    # Kelas positif (APD hadir)
+    "Person":   (  0, 165, 255),   # oranye
     "helmet":   (  0, 210,   0),   # hijau terang
-    "gloves":   (210,   0, 210),   # ungu
     "vest":     (255, 185,   0),   # biru muda
     "boots":    (  0, 210, 210),   # kuning
-    "goggles":  (210, 210,   0),   # cyan
-    "none":     (130, 130, 130),   # abu-abu
-    # Kelas orang
-    "Person":   (  0, 165, 255),   # oranye (patuh)
-    # Kelas negatif → selalu merah cerah
-    "no_helmet": (0,  0, 255),
-    "no_goggle": (0,  0, 255),
-    "no_gloves": (0,  0, 255),
-    "no_boots":  (0,  0, 255),
+    "gloves":   (210,   0, 210),   # ungu
 }
 
 PERSON_VIOLATION_COLOR = VIOLATION_COLOR   # (0, 0, 255) merah cerah

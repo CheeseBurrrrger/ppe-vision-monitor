@@ -49,32 +49,18 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 CLASS_NAMES: Dict[int, str] = {
-    0:  "helmet",
-    1:  "gloves",
-    2:  "vest",
-    3:  "boots",
-    4:  "goggles",
-    5:  "none",
-    6:  "Person",
-    7:  "no_helmet",
-    8:  "no_goggle",
-    9:  "no_gloves",
-    10: "no_boots",
+    0: "Person",
+    1: "helmet",
+    2: "vest",
+    3: "boots",
+    4: "gloves",
 }
 
-# Kelas APD positif (pakai APD)
-PPE_POSITIVE_CLASSES = {"helmet", "gloves", "vest", "boots", "goggles"}
+PPE_POSITIVE_CLASSES = {"helmet", "gloves", "vest", "boots"}
 
-# Kelas APD negatif (tidak pakai APD) → langsung trigger violation
-PPE_NEGATIVE_CLASSES = {"no_helmet", "no_goggle", "no_gloves", "no_boots"}
+PPE_NEGATIVE_CLASSES: set = set()
 
-# Mapping: kelas negatif → kelas positif pasangannya
-NEGATIVE_TO_POSITIVE: Dict[str, str] = {
-    "no_helmet": "helmet",
-    "no_goggle":  "goggles",
-    "no_gloves":  "gloves",
-    "no_boots":   "boots",
-}
+NEGATIVE_TO_POSITIVE: Dict[str, str] = {}
 
 # Mapping: kelas positif → nama APD display
 PPE_DISPLAY_NAMES: Dict[str, str] = {
@@ -82,11 +68,9 @@ PPE_DISPLAY_NAMES: Dict[str, str] = {
     "gloves":  "Sarung Tangan",
     "vest":    "Rompi",
     "boots":   "Sepatu Safety",
-    "goggles": "Goggle",
 }
 
-# APD wajib sesuai standar Epson Factory K3
-REQUIRED_PPE = ["helmet", "vest", "boots", "goggles", "gloves"]
+REQUIRED_PPE = ["helmet", "vest", "boots", "gloves"]
 
 # APD yang dikecualikan saat person partial (hanya terlihat sebagian)
 PARTIAL_EXEMPT_PPE = {"boots", "gloves"}
@@ -100,16 +84,10 @@ ALL_PPE = REQUIRED_PPE
 
 # Zona Y relatif terhadap tinggi bbox Person (top=0.0, bottom=1.0)
 Y_ZONES: Dict[str, Tuple[float, float]] = {
-    "helmet":  (0.00, 0.40),   # kepala
-    "goggles": (0.00, 0.40),   # mata/kepala
-    "vest":    (0.20, 0.80),   # badan
-    "gloves":  (0.35, 1.00),   # tangan ke bawah
-    "boots":   (0.60, 1.00),   # kaki
-    # Kelas negatif memakai zona yang sama dengan pasangannya
-    "no_helmet": (0.00, 0.55),
-    "no_goggle": (0.00, 0.55),
-    "no_gloves": (0.30, 1.00),
-    "no_boots":  (0.55, 1.00),
+    "helmet":  (0.00, 0.40),
+    "vest":    (0.20, 0.80),
+    "gloves":  (0.35, 1.00),
+    "boots":   (0.60, 1.00),
 }
 
 MIN_OVERLAP:          float = 0.20   # minimum IoU untuk fallback detection
@@ -122,7 +100,6 @@ PANEL_LABELS: Dict[str, str] = {
     "helmet":  "Helm    ",
     "vest":    "Rompi   ",
     "boots":   "Sepatu  ",
-    "goggles": "Goggle  ",
     "gloves":  "Gloves  ",
 }
 
@@ -143,35 +120,28 @@ BACKEND_TIMEOUT = 5
 VIOLATION_RULES: Dict[str, dict] = {
     "no_helmet": {
         "ppe_class":   "helmet",
-        "neg_class":   "no_helmet",
+        "neg_class":   None,
         "description": "Pekerja tidak menggunakan helm safety",
         "severity":    "HIGH",
         "cooldown":    12,
     },
     "no_vest": {
         "ppe_class":   "vest",
-        "neg_class":   None,           # tidak ada kelas negatif untuk vest
+        "neg_class":   None,
         "description": "Pekerja tidak menggunakan rompi safety (vest)",
         "severity":    "HIGH",
         "cooldown":    12,
     },
     "no_boots": {
         "ppe_class":   "boots",
-        "neg_class":   "no_boots",
+        "neg_class":   None,
         "description": "Pekerja tidak menggunakan sepatu safety",
         "severity":    "HIGH",
         "cooldown":    20,
     },
-    "no_goggles": {
-        "ppe_class":   "goggles",
-        "neg_class":   "no_goggle",
-        "description": "Pekerja tidak menggunakan kacamata pelindung (goggle)",
-        "severity":    "HIGH",
-        "cooldown":    12,
-    },
     "no_gloves": {
         "ppe_class":   "gloves",
-        "neg_class":   "no_gloves",
+        "neg_class":   None,
         "description": "Pekerja tidak menggunakan sarung tangan safety",
         "severity":    "MEDIUM",
         "cooldown":    20,
