@@ -230,7 +230,7 @@ class APDInferencePipeline:
 
     def __init__(
         self,
-        model_path:   str           = "bestArbi.pt",
+        model_path:   str           = "best.pt",
         confidence:   float         = 0.30,
         iou:          float         = 0.45,
         camera_id:    str           = "EPSON_CAM_01",
@@ -239,6 +239,7 @@ class APDInferencePipeline:
         skip_frames:  int           = 1,
         backend_url:  Optional[str] = "https://localhost:8000",
         use_onnx:     bool          = False,
+        service_key:  str           = "",
     ):
         self._print_banner()
         self.use_onnx    = use_onnx
@@ -262,6 +263,7 @@ class APDInferencePipeline:
             save_screenshots = True,
             log_to_file      = True,
             backend_url      = backend_url,
+            service_key      = service_key,
         )
 
         self.frame_count = 0

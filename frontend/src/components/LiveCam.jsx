@@ -12,6 +12,10 @@ export default function LiveCam() {
   ];
   useEffect(() => {
     if (selectedCam) {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        console.warn("Camera unavailable (HTTPS required on non-localhost)");
+        return;
+      }
       navigator.mediaDevices.getUserMedia({ video: true })
         .then(stream => {
           if (videoRef.current) {

@@ -404,11 +404,13 @@ class ViolationLogic:
         save_screenshots: bool          = True,
         log_to_file:      bool          = True,
         backend_url:      Optional[str] = "https://localhost:8000",
+        service_key:      str           = "",
     ):
         self.camera_id        = camera_id
         self.save_screenshots = save_screenshots
         self.log_to_file      = log_to_file
         self.backend_url      = backend_url
+        self.service_key      = service_key
         self.output_dir       = Path(output_dir)
         self.screenshot_dir   = self.output_dir / "screenshots"
 
@@ -591,11 +593,14 @@ class ViolationLogic:
 
     def _send_backend(self, ev: ViolationEvent):
         try:
+            headers = {"Content-Type": "application/json"}
+            if self.service_key:
+                headers["X-Service-Key"] = self.service_key
             r = requests.post(
                 f"{self.backend_url}/violations",
                 json    = ev.to_payload(),
                 timeout = BACKEND_TIMEOUT,
-                headers = {"Content-Type": "application/json"},
+                headers = headers,
             )
             if r.status_code == 201:
                 ev.sent_to_backend = True

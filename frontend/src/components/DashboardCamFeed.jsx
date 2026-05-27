@@ -16,13 +16,21 @@ export default function DashboardCamFeed({ label, deviceId }) {
       return;
     }
 
-    navigator.mediaDevices.getUserMedia({
-      video: deviceId ? { deviceId: { exact: deviceId } } : true
-    })
+    const constraints = deviceId
+      ? { video: { deviceId: { exact: deviceId } } }
+      : { video: true };
+
+    navigator.mediaDevices.getUserMedia(constraints)
       .then(stream => {
         if (videoRef.current) videoRef.current.srcObject = stream;
       })
-      .catch(err => console.error("Cam error:", err));
+      .catch(() => {
+        navigator.mediaDevices.getUserMedia({ video: true })
+          .then(stream => {
+            if (videoRef.current) videoRef.current.srcObject = stream;
+          })
+          .catch(err => console.error("Cam error:", err));
+      });
 
     return () => {
       if (videoRef.current?.srcObject)

@@ -21,7 +21,7 @@ pipelines = {}
 def get_pipeline(camera_id):
     if camera_id not in pipelines:
         pipelines[camera_id] = APDInferencePipeline(
-            model_path=os.path.join(os.path.dirname(__file__), '..', 'model', 'bestArbi.pt'),
+            model_path=os.path.join(os.path.dirname(__file__), '..', 'model', 'best.pt'),
             camera_id=camera_id,
             output_dir=os.path.join(os.path.dirname(__file__), 'inference_output'),
             backend_url=BACKEND_URL,
