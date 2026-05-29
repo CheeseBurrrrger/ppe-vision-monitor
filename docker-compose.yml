@@ -41,8 +41,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "${FRONTEND_PORT:-80}:80"
-      - "443:443"
+      - "${FRONTEND_HTTPS_PORT:-8443}:443"
     depends_on:
       - backend
     restart: unless-stopped
@@ -55,8 +54,8 @@ services:
       BACKEND_URL: http://backend:8000
       CV_SERVICE_KEY: ${CV_SERVICE_KEY}
       WS_PORT: 8765
-    ports:
-      - "8765:8765"
+    expose:
+      - "8765"
     volumes:
       - ${CV_OUTPUT_DIR:-./core/inference_output}:/app/core/inference_output
     depends_on:

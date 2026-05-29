@@ -40,7 +40,7 @@ export default function DashboardCamFeed({ label, deviceId }) {
 
   useEffect(() => {
     const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
-    const wsUrl = import.meta.env.VITE_WS_URL || `${wsProto}://${window.location.hostname}:8765`;
+    const wsUrl = import.meta.env.VITE_WS_URL || `${wsProto}://${window.location.host}/ws`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
