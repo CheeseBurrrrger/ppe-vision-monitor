@@ -6,6 +6,12 @@ import sys
 import os
 import json
 import websockets
+
+# Disable MKLDNN before importing torch — required for CPUs without AVX/SSE4
+# (e.g. older KVM VPS). Harmless on modern CPUs.
+import torch
+torch.backends.mkldnn.enabled = False
+
 from ultralytics import YOLO
 
 sys.path.insert(0, os.path.dirname(__file__))
