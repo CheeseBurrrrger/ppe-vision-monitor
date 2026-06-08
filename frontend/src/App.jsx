@@ -1,5 +1,5 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import Login from "./pages/Login";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import AuthLanding from "./pages/AuthLanding";
 import Dashboard from "./pages/Dashboard";
 
 function ProtectedRoute({ children }) {
@@ -8,12 +8,17 @@ function ProtectedRoute({ children }) {
   return children;
 }
 
+function LoginPage() {
+  const navigate = useNavigate();
+  return <AuthLanding onSuccess={() => navigate("/dashboard")} />;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Navigate to="/login" />} />
-        <Route path="/login" element={<Login />} />
+        <Route path="/login" element={<LoginPage />} />
         <Route
           path="/dashboard"
           element={
