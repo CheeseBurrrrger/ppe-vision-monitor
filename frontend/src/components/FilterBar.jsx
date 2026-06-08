@@ -21,23 +21,30 @@ const SHIFT_OPTIONS = [
 
 export default function FilterBar({ onFilterChange }) {
   const [type, setType]       = useState("");
+  const [shift, setShift]     = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo]   = useState("");
 
   const handleTypeChange = (e) => {
     const val = e.target.value;
     setType(val);
-    onFilterChange?.({ type: val, dateFrom, dateTo });
+    onFilterChange?.({ type: val, shift, dateFrom, dateTo });
+  };
+
+  const handleShiftChange = (e) => {
+    const val = e.target.value;
+    setShift(val);
+    onFilterChange?.({ type, shift: val, dateFrom, dateTo });
   };
 
   const handleDateFrom = (e) => {
     setDateFrom(e.target.value);
-    onFilterChange?.({ type, dateFrom: e.target.value, dateTo });
+    onFilterChange?.({ type, shift, dateFrom: e.target.value, dateTo });
   };
 
   const handleDateTo = (e) => {
     setDateTo(e.target.value);
-    onFilterChange?.({ type, dateFrom, dateTo: e.target.value });
+    onFilterChange?.({ type, shift, dateFrom, dateTo: e.target.value });
   };
 
   const exportUrl = `${API_BASE}/export-csv?${new URLSearchParams({
@@ -54,7 +61,7 @@ export default function FilterBar({ onFilterChange }) {
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
-        <select className="border p-2 rounded-lg w-full">
+        <select className="border p-2 rounded-lg w-full" value={shift} onChange={handleShiftChange}>
           {SHIFT_OPTIONS.map(o => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}

@@ -38,24 +38,34 @@ const getShift = (timestamp) => {
   if (hour >= 14 && hour < 22) return "Shift 2";
   return "Shift 3";
 };
+const matchesShift = (timestamp, shift) => {
+  if (!shift) return true;
+  const hour = new Date(timestamp).getHours();
+  if (shift === "1") return hour >= 6 && hour < 14;
+  if (shift === "2") return hour >= 14 && hour < 22;
+  if (shift === "3") return hour >= 22 || hour < 6;
+  return true;
+};
+
 export function LogTable({ filters = {} }) {
   const [page, setPage] = useState(0);
-  const { type = "All", dateFrom, dateTo } = filters;
+  const { type = "All", shift = "", dateFrom, dateTo } = filters;
   useEffect(() => {
     setPage(0);
-  }, [type, dateFrom, dateTo]);
-  const { data: violations = [], isLoading, isError } = useQuery({
+  }, [type, shift, dateFrom, dateTo]);
+  const { data: rawViolations = [], isLoading, isError } = useQuery({
     queryKey: ["violations", type, dateFrom, dateTo, page],
     queryFn: () => fetchViolations({
-      type,        
-      dateFrom,      
-      dateTo,        
+      type,
+      dateFrom,
+      dateTo,
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
     }),
     refetchInterval: 3000,
     refetchOnWindowFocus: true,
   });
+  const violations = rawViolations.filter(v => matchesShift(v.timestamp, shift));
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">

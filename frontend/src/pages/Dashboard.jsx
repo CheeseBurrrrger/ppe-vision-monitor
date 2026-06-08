@@ -14,7 +14,7 @@ import DashboardCamFeed from "../components/DashboardCamFeed";
 export default function Dashboard() {
   // State untuk melacak menu mana yang aktif
   const [activeMenu, setActiveMenu] = useState("Dashboard");
-  const [filters, setFilters] = useState({ type: "", dateFrom: "", dateTo: "" });
+  const [filters, setFilters] = useState({ type: "", shift: "", dateFrom: "", dateTo: "" });
 
 
 return (
