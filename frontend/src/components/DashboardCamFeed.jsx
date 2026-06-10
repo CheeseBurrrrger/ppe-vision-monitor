@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
 export default function DashboardCamFeed({ label, deviceId }) {
-  const videoRef = useRef(null);
-  const captureCanvasRef = useRef(null);  // hidden, for sending frames
-  const overlayCanvasRef = useRef(null);  // visible, for drawing boxes
-  const wsRef = useRef(null);
-  const intervalRef = useRef(null);
-  const [timestamp, setTimestamp] = useState('');
+  const videoRef         = useRef(null);
+  const captureCanvasRef = useRef(null);
+  const overlayCanvasRef = useRef(null);
+  const wsRef            = useRef(null);
+  const waitingRef       = useRef(false);   // prevents frame queue buildup
+  const intervalRef      = useRef(null);
+  const [timestamp, setTimestamp]   = useState('');
   const [violations, setViolations] = useState([]);
 
   // Start camera
@@ -30,23 +31,31 @@ export default function DashboardCamFeed({ label, deviceId }) {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log("[WS] Connected");
-      intervalRef.current = setInterval(() => {
-        const video = videoRef.current;
-        const canvas = captureCanvasRef.current;
-        if (!video || !canvas || video.readyState < 2 || ws.readyState !== WebSocket.OPEN) return;
+      console.log(`[WS] Connected — ${label}`);
 
-        canvas.width = 640;
+      intervalRef.current = setInterval(() => {
+        const video  = videoRef.current;
+        const canvas = captureCanvasRef.current;
+
+        // Skip if server hasn't responded to last frame yet
+        if (waitingRef.current) return;
+        if (!video || !canvas || video.readyState < 2) return;
+        if (ws.readyState !== WebSocket.OPEN) return;
+
+        canvas.width  = 640;
         canvas.height = 480;
-        const ctx = canvas.getContext("2d");
+        const ctx    = canvas.getContext("2d");
         ctx.drawImage(video, 0, 0, 640, 480);
         const base64 = canvas.toDataURL("image/jpeg", 0.6).split(",")[1];
 
+        waitingRef.current = true;   // block next send until response arrives
         ws.send(JSON.stringify({ camera_id: label, frame: base64 }));
-      }, 500);
+      }, 100);  // poll frequently, but waitingRef gates the actual sends
     };
 
     ws.onmessage = (e) => {
+      waitingRef.current = false;   // unblock next frame send
+
       const data = JSON.parse(e.data);
       drawBoxes(data.detections || []);
 
@@ -57,7 +66,10 @@ export default function DashboardCamFeed({ label, deviceId }) {
     };
 
     ws.onerror = (e) => console.error("[WS] Error:", e);
-    ws.onclose = () => clearInterval(intervalRef.current);
+    ws.onclose = () => {
+      clearInterval(intervalRef.current);
+      waitingRef.current = false;
+    };
 
     return () => {
       clearInterval(intervalRef.current);
@@ -66,41 +78,44 @@ export default function DashboardCamFeed({ label, deviceId }) {
   }, []);
 
   const drawBoxes = (detections) => {
-    const video = videoRef.current;
+    const video  = videoRef.current;
     const canvas = overlayCanvasRef.current;
     if (!canvas || !video) return;
 
-    canvas.width = video.clientWidth;
+    canvas.width  = video.clientWidth;
     canvas.height = video.clientHeight;
-    const ctx = canvas.getContext("2d");
+    const ctx    = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const scaleX = canvas.width / 640;
+    const scaleX = canvas.width  / 640;
     const scaleY = canvas.height / 480;
 
     detections.forEach(det => {
       const [x1, y1, x2, y2] = det.bbox;
-      const isViolation = det.class.startsWith("no_");
-      let color = isViolation ? "#FF0000" : "#00CC00";
-      
+
+      // Determine color by class
+      let color;
+      if (det.class === "Person") {
+        color = "#2196F3";   // blue
+      } else {
+        color = "#00CC00";   // green for all PPE (no negative classes anymore)
+      }
+
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x1 * scaleX, y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
+      ctx.lineWidth   = 2;
+      ctx.strokeRect(
+        x1 * scaleX,
+        y1 * scaleY,
+        (x2 - x1) * scaleX,
+        (y2 - y1) * scaleY
+      );
 
       const labelText = `${det.class} ${det.confidence}`;
       ctx.fillStyle = color;
       ctx.fillRect(x1 * scaleX, y1 * scaleY - 20, labelText.length * 7 + 8, 20);
       ctx.fillStyle = "#ffffff";
-      ctx.font = "12px monospace";
+      ctx.font      = "12px monospace";
       ctx.fillText(labelText, x1 * scaleX + 4, y1 * scaleY - 5);
-      // let color;
-      if (det.class === "Person") {
-        color = "#2196F3";        
-      } else if (det.class.startsWith("no_")) {
-        color = "#FF0000";        // red for violation
-      } else {
-        color = "#00CC00";        // green for compliant PPE
-      }
     });
   };
 
@@ -124,11 +139,7 @@ export default function DashboardCamFeed({ label, deviceId }) {
           autoPlay playsInline muted
           className="w-full h-full object-cover"
         />
-
-        {/* Hidden capture canvas */}
         <canvas ref={captureCanvasRef} className="hidden" />
-
-        {/* Visible overlay canvas for boxes */}
         <canvas
           ref={overlayCanvasRef}
           className="absolute inset-0 w-full h-full"

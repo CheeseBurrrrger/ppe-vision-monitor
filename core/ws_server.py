@@ -6,26 +6,38 @@ import sys
 import os
 import json
 import websockets
-from ultralytics import YOLO
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(__file__))
 from inference import APDInferencePipeline
-from violation_logic import ViolationLogic
 
 BACKEND_URL = "http://localhost:8000"
 WS_PORT = 8765
 
 pipelines = {}
+executor = ThreadPoolExecutor(max_workers=2)  # one worker per camera
 
 def get_pipeline(camera_id):
     if camera_id not in pipelines:
         pipelines[camera_id] = APDInferencePipeline(
-            model_path=os.path.join(os.path.dirname(__file__), '..', 'model', 'bestArbi.pt'),
+            model_path=os.path.join(os.path.dirname(__file__), '..', 'model', 'hasil_akhir_yolo11m.pt'),
             camera_id=camera_id,
             output_dir=os.path.join(os.path.dirname(__file__), 'inference_output'),
             backend_url=BACKEND_URL,
         )
     return pipelines[camera_id]
+
+def run_pipeline_sync(camera_id, frame):
+    """Blocking inference — runs in thread pool, off the event loop."""
+    pipeline = get_pipeline(camera_id)
+    detections = pipeline.run_inference(frame)
+    pipeline.frame_count += 1
+    events = pipeline.violation_logic.process(
+        detections=detections,
+        frame=frame,
+        frame_number=pipeline.frame_count,
+    )
+    return detections, events
 
 async def handle(websocket):
     async for message in websocket:
@@ -35,44 +47,40 @@ async def handle(websocket):
             frame_b64 = data.get("frame", "")
 
             img_bytes = base64.b64decode(frame_b64)
-            nparr = np.frombuffer(img_bytes, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            nparr     = np.frombuffer(img_bytes, np.uint8)
+            frame     = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if frame is None:
                 continue
 
-            # Get or create pipeline for this camera
-            pipeline = get_pipeline(camera_id)
-
-            detections = pipeline.run_inference(frame)
-            pipeline.frame_count += 1
-
-            events = pipeline.violation_logic.process(
-                detections=detections,
-                frame=frame,
-                frame_number=pipeline.frame_count,
+            # Run blocking YOLO inference off the event loop
+            loop = asyncio.get_event_loop()
+            detections, events = await loop.run_in_executor(
+                executor, run_pipeline_sync, camera_id, frame
             )
 
             result = {
                 "detections": [
                     {
-                        "class": d.class_name,
+                        "class":      d.class_name,
                         "confidence": round(d.confidence, 3),
-                        "bbox": list(d.bbox)
+                        "bbox":       list(d.bbox)
                     }
                     for d in detections
                 ],
                 "violations": [
                     {
-                        "type": e.violation_type,
-                        "severity": e.severity,
+                        "type":       e.violation_type,
+                        "severity":   e.severity,
                         "confidence": e.confidence
                     }
                     for e in events
                 ]
             }
             await websocket.send(json.dumps(result))
+
         except Exception as e:
             print(f"[WS] Error: {e}")
+
 async def main():
     print(f"[WS] Starting server on ws://localhost:{WS_PORT}")
     async with websockets.serve(handle, "localhost", WS_PORT):

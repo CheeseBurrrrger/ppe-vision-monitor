@@ -1,33 +1,32 @@
 """
-inference.py  [v5.0 — Epson Factory K3 | 11-Class Dual Detection]
+inference.py  [v6.0 — Epson Factory K3 | 5-Class Positive-Only]
 ==================================================================
 Pipeline inference real-time YOLOv11 untuk deteksi APD K3 Epson.
 
-Kelas model best.pt (11 kelas aktual):
-    0: helmet        → HIJAU TERANG  (APD hadir)
-    1: gloves        → UNGU          (APD hadir)
-    2: vest          → BIRU MUDA     (APD hadir)
-    3: boots         → KUNING        (APD hadir)
-    4: goggles       → CYAN          (APD hadir)
-    5: none          → ABU-ABU       (tidak ada APD)
-    6: Person        → ORANYE (patuh) / MERAH CERAH (langgar)
-    7: no_helmet     → MERAH CERAH   (langsung trigger violation)
-    8: no_goggle     → MERAH CERAH   (langsung trigger violation)
-    9: no_gloves     → MERAH CERAH   (langsung trigger violation)
-   10: no_boots      → MERAH CERAH   (langsung trigger violation)
+Kelas model bestDevaLatest.pt (5 kelas aktual):
+    0: person        → Deteksi orang
+    1: helmet        → APD hadir: helm
+    2: safety-vest   → APD hadir: rompi
+    3: gloves        → APD hadir: sarung tangan
+    4: shoes         → APD hadir: sepatu safety
 
-Strategi Deteksi v5.0 — DUAL MODE:
-  Mode A (PRIMER)  : Kelas negatif (no_helmet, dll) langsung = VIOLATION
-  Mode B (SEKUNDER): Kelas positif tidak ditemukan di sekitar Person = VIOLATION
+Normalisasi internal:
+    "person"       → "Person"
+    "safety-vest"  → "vest"
+    "shoes"        → "boots"
 
-Standard K3 Epson: Helm + Rompi + Sepatu + Goggle + Sarung Tangan
+Strategi Deteksi v6.0 — MODE B ONLY:
+  Tidak ada kelas negatif di model ini.
+  Pelanggaran = APD positif tidak ditemukan di sekitar bbox Person.
+
+Standard K3 Epson: Helm + Rompi + Sepatu + Sarung Tangan (4 APD)
 
 Cara pakai:
-  python inference.py --source 0 --model best.pt --no-backend
-  python inference.py --source video.mp4 --model best.pt --skip 2 --no-backend
-  python inference.py --source rtsp://ip:port/stream --model best.pt
-  python inference.py --source 0 --model best.pt --save-video out.mp4 --no-backend
-  python inference.py --source 0 --model best.onnx --use-onnx --no-backend
+  python inference.py --source 0 --model bestDevaLatest.pt --no-backend
+  python inference.py --source video.mp4 --model bestDevaLatest.pt --skip 2 --no-backend
+  python inference.py --source rtsp://ip:port/stream --model bestDevaLatest.pt
+  python inference.py --source 0 --model bestDevaLatest.pt --save-video out.mp4 --no-backend
+  python inference.py --source 0 --model bestDevaLatest.onnx --use-onnx --no-backend
 """
 
 import cv2
@@ -37,12 +36,13 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-# ── Import violation_logic v5.0 ───────────────────────────────────
+# ── Import violation_logic v6.0 ───────────────────────────────────
 from violation_logic import (
     ViolationLogic,
     Detection,
     ViolationEvent,
     CLASS_NAMES,
+    MODEL_NAME_MAP,
     REQUIRED_PPE,
     ALL_PPE,
     Y_ZONES,
@@ -56,7 +56,6 @@ from violation_logic import (
     UNKNOWN_COLOR,
     WARNING_COLOR,
     PPE_POSITIVE_CLASSES,
-    PPE_NEGATIVE_CLASSES,
     PPE_DISPLAY_NAMES,
     get_person_ppe_dict,
     is_partial_person,
@@ -71,24 +70,15 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────
-#  WARNA PER KELAS (BGR)
+#  WARNA PER KELAS (BGR) — hanya 5 kelas
 # ─────────────────────────────────────────────
 
 CLASS_COLORS = {
-    # Kelas positif (APD hadir)
-    "helmet":   (  0, 210,   0),   # hijau terang
-    "gloves":   (210,   0, 210),   # ungu
-    "vest":     (255, 185,   0),   # biru muda
-    "boots":    (  0, 210, 210),   # kuning
-    "goggles":  (210, 210,   0),   # cyan
-    "none":     (130, 130, 130),   # abu-abu
-    # Kelas orang
-    "Person":   (  0, 165, 255),   # oranye (patuh)
-    # Kelas negatif → selalu merah cerah
-    "no_helmet": (0,  0, 255),
-    "no_goggle": (0,  0, 255),
-    "no_gloves": (0,  0, 255),
-    "no_boots":  (0,  0, 255),
+    "helmet": (  0, 210,   0),   # hijau terang
+    "gloves": (210,   0, 210),   # ungu
+    "vest":   (255, 185,   0),   # kuning-oranye
+    "boots":  (  0, 210, 210),   # cyan
+    "Person": (  0, 165, 255),   # oranye (patuh)
 }
 
 PERSON_VIOLATION_COLOR = VIOLATION_COLOR   # (0, 0, 255) merah cerah
@@ -110,7 +100,6 @@ def scale_coords(
 ) -> Tuple[int, int, int, int]:
     """
     Konversi koordinat dari ruang model (640×640) ke resolusi frame asli.
-    WAJIB dipanggil sebelum membuat objek Detection agar posisi bbox akurat.
     """
     scale_x = orig_w / model_size
     scale_y = orig_h / model_size
@@ -194,11 +183,8 @@ def _get_ppe_visual_status(
     if not person_dets:
         return "orphan"
 
-    # Kelas negatif selalu tampil sebagai "valid" jika ada person di dekatnya
-    is_negative = ppe_det.class_name in PPE_NEGATIVE_CLASSES
-
-    cx, cy   = bbox_center(ppe_det.bbox)
-    y_zone   = Y_ZONES.get(ppe_det.class_name, (0.0, 1.0))
+    cx, cy = bbox_center(ppe_det.bbox)
+    y_zone = Y_ZONES.get(ppe_det.class_name, (0.0, 1.0))
 
     for person in person_dets:
         px1, py1, px2, py2 = person.bbox
@@ -211,13 +197,12 @@ def _get_ppe_visual_status(
         y_min_abs = py1 + y_zone[0] * person_h
         y_max_abs = py1 + y_zone[1] * person_h
 
-        if inside_x and inside_y:
-            if is_negative or (y_min_abs <= cy <= y_max_abs):
-                return "valid"
+        if inside_x and inside_y and y_min_abs <= cy <= y_max_abs:
+            return "valid"
 
-        if (overlap_ratio(ppe_det.bbox, person.bbox) >= MIN_OVERLAP):
-            if is_negative or (y_min_abs <= cy <= y_max_abs):
-                return "valid"
+        if (overlap_ratio(ppe_det.bbox, person.bbox) >= MIN_OVERLAP
+                and y_min_abs <= cy <= y_max_abs):
+            return "valid"
 
     return "orphan"
 
@@ -230,14 +215,14 @@ class APDInferencePipeline:
 
     def __init__(
         self,
-        model_path:   str           = "bestArbi.pt",
-        confidence:   float         = 0.30,
+        model_path:   str           = "hasil_akhir_yolo11m.pt",
+        confidence:   float         = 0.33,
         iou:          float         = 0.45,
         camera_id:    str           = "EPSON_CAM_01",
         output_dir:   str           = "inference_output",
         device:       str           = "cpu",
         skip_frames:  int           = 1,
-        backend_url:  Optional[str] = "https://localhost:8000",
+        backend_url:  Optional[str] = "http://localhost:8000",
         use_onnx:     bool          = False,
     ):
         self._print_banner()
@@ -266,6 +251,7 @@ class APDInferencePipeline:
 
         self.frame_count = 0
         self.fps_display = 0.0
+        # Track detections using internal normalized names
         self.class_count = {name: 0 for name in CLASS_NAMES.values()}
 
         print(f"[INFO] Confidence     : {confidence}")
@@ -283,7 +269,7 @@ class APDInferencePipeline:
     # ─────────────────────────────────────────
 
     def _load_onnx(self, model_path: str):
-        """Load model via ONNX Runtime (lebih cepat di CPU)."""
+        """Load model via ONNX Runtime."""
         try:
             import onnxruntime as ort
         except ImportError:
@@ -291,31 +277,32 @@ class APDInferencePipeline:
 
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] \
                     if self.device != "cpu" else ["CPUExecutionProvider"]
-        self.ort_session = ort.InferenceSession(model_path, providers=providers)
+        self.ort_session     = ort.InferenceSession(model_path, providers=providers)
         self.ort_input_name  = self.ort_session.get_inputs()[0].name
-        self.model = None
+        self.model           = None
         print(f"[INFO] ONNX Runtime   : {ort.__version__}")
         print(f"[INFO] Providers      : {self.ort_session.get_providers()}")
 
     # ─────────────────────────────────────────
-    #  VERIFIKASI KELAS
+    #  VERIFIKASI KELAS — informational only
     # ─────────────────────────────────────────
 
     def _verify_classes(self):
+        """
+        Log kelas aktual model dan tampilkan mapping normalisasi.
+        Tidak lagi dianggap [WARN] — normalisasi sudah dihandle di _run_yolo().
+        """
         model_names = self.model.names
-        expected    = CLASS_NAMES  # {0:'helmet', 1:'gloves', ... 10:'no_boots'}
-        mismatch    = [
-            f"  class {cid}: expected '{nm}', got '{model_names.get(cid, '???')}'"
-            for cid, nm in expected.items()
-            if model_names.get(cid) != nm
-        ]
-        print(f"[INFO] Model classes  : {model_names}")
-        if mismatch:
-            print("[WARN] Class mismatch — cek CLASS_NAMES di violation_logic.py:")
-            for m in mismatch:
-                print(m)
+        print(f"[INFO] Model classes (raw)  : {model_names}")
+        print(f"[INFO] Normalization map    : {MODEL_NAME_MAP}")
+
+        # Verifikasi semua nama model ada di mapping
+        unknown = [n for n in model_names.values() if n not in MODEL_NAME_MAP]
+        if unknown:
+            print(f"[WARN] Nama kelas tidak dikenal di MODEL_NAME_MAP: {unknown}")
+            print(f"       Tambahkan ke MODEL_NAME_MAP di violation_logic.py")
         else:
-            print("[INFO] Class names    : ✓ semua 11 kelas sesuai")
+            print(f"[INFO] Class normalization : ✓ semua {len(model_names)} kelas terpeta")
 
     # ─────────────────────────────────────────
     #  INFERENCE + SCALE + NMS
@@ -323,14 +310,16 @@ class APDInferencePipeline:
 
     def run_inference(self, frame: np.ndarray) -> List[Detection]:
         orig_h, orig_w = frame.shape[:2]
-
         if self.use_onnx:
             return self._run_onnx(frame, orig_w, orig_h)
         else:
             return self._run_yolo(frame, orig_w, orig_h)
 
     def _run_yolo(self, frame: np.ndarray, orig_w: int, orig_h: int) -> List[Detection]:
-        """Inference via Ultralytics YOLO (.pt)."""
+        """
+        Inference via Ultralytics YOLO (.pt).
+        Nama kelas dinormalisasi via MODEL_NAME_MAP sebelum membuat Detection.
+        """
         if orig_w != MODEL_INPUT_SIZE or orig_h != MODEL_INPUT_SIZE:
             frame_inp = cv2.resize(frame, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
         else:
@@ -348,9 +337,12 @@ class APDInferencePipeline:
             if result.boxes is None:
                 continue
             for box in result.boxes:
-                cid   = int(box.cls[0].item())
-                cname = CLASS_NAMES.get(cid, f"class_{cid}")
-                conf  = float(box.conf[0].item())
+                cid        = int(box.cls[0].item())
+                conf       = float(box.conf[0].item())
+
+                # Ambil nama raw dari model, lalu normalisasi ke nama internal
+                raw_name   = result.names.get(cid, f"class_{cid}")
+                cname      = MODEL_NAME_MAP.get(raw_name, raw_name)
 
                 raw_bbox         = tuple(float(v) for v in box.xyxy[0].tolist())
                 x1, y1, x2, y2  = scale_coords(raw_bbox, orig_w, orig_h)
@@ -368,19 +360,16 @@ class APDInferencePipeline:
         return _apply_class_nms(detections, NMS_IOU_THRESHOLD)
 
     def _run_onnx(self, frame: np.ndarray, orig_w: int, orig_h: int) -> List[Detection]:
-        """Inference via ONNX Runtime (.onnx) — lebih cepat di CPU."""
+        """Inference via ONNX Runtime (.onnx)."""
         img = cv2.resize(frame, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))[np.newaxis, :]  # NCHW
 
         outputs = self.ort_session.run(None, {self.ort_input_name: img})
-        # YOLOv8/v11 ONNX output: [1, num_classes+4, num_anchors]
-        preds = outputs[0][0]  # [84, 8400] atau [15, 8400] tergantung model
+        preds   = outputs[0][0]  # [num_classes+4, num_anchors]
+        preds_t = preds.T        # [num_anchors, num_classes+4]
 
         detections = []
-        num_classes = preds.shape[0] - 4
-        preds_t     = preds.T  # [8400, 84]
-
         for row in preds_t:
             boxes  = row[:4]
             scores = row[4:]
@@ -396,7 +385,12 @@ class APDInferencePipeline:
             x2 = float(cx + bw / 2)
             y2 = float(cy + bh / 2)
 
-            cname           = CLASS_NAMES.get(cid, f"class_{cid}")
+            # Normalisasi nama dari CLASS_NAMES (index-based) + MODEL_NAME_MAP
+            raw_name = CLASS_NAMES.get(cid, f"class_{cid}")
+            # CLASS_NAMES sudah berisi nama internal, tapi untuk ONNX
+            # kita perlu mapping yang sama — gunakan raw model index
+            # Asumsi: ONNX output mengikuti urutan kelas model yang sama
+            cname           = raw_name   # CLASS_NAMES sudah dinormalisasi
             x1, y1, x2, y2 = scale_coords((x1, y1, x2, y2), orig_w, orig_h)
 
             if x2 <= x1 or y2 <= y1:
@@ -442,19 +436,16 @@ class APDInferencePipeline:
         """
         Layer render (bawah → atas):
           1. Bbox APD positif  — warna kelas
-          2. Bbox APD negatif  — merah + label
-          3. Bbox Person       — oranye/merah + label APD missing
-          4. Panel info kiri atas
-          5. Panel status K3 kanan atas  (5 APD Epson)
-          6. Banner pelanggaran bawah
+          2. Bbox Person       — oranye/merah + label APD missing
+          3. Panel info kiri atas
+          4. Panel status K3 kanan atas (4 APD Epson)
+          5. Banner pelanggaran bawah
         """
         vis = frame.copy()
         h, w = vis.shape[:2]
 
         person_dets  = [d for d in detections if d.class_name == "Person"]
         ppe_pos_dets = [d for d in detections if d.class_name in PPE_POSITIVE_CLASSES]
-        ppe_neg_dets = [d for d in detections if d.class_name in PPE_NEGATIVE_CLASSES]
-        none_dets    = [d for d in detections if d.class_name == "none"]
 
         # ── Layer 1: Bbox APD positif ─────────────────────────────────────
         for det in ppe_pos_dets:
@@ -470,15 +461,7 @@ class APDInferencePipeline:
                 lbl = f"{det.class_name} {det.confidence:.2f}"
                 self._draw_label(vis, lbl, x1, y1, color, scale=0.38)
 
-        # ── Layer 2: Bbox APD negatif (MERAH) ────────────────────────────
-        for det in ppe_neg_dets:
-            x1, y1, x2, y2 = det.bbox
-            # Garis putus-putus merah untuk kelas negatif (lebih tebal)
-            cv2.rectangle(vis, (x1, y1), (x2, y2), VIOLATION_COLOR, 2)
-            lbl = f"!{det.class_name.upper()} {det.confidence:.2f}"
-            self._draw_label(vis, lbl, x1, y1, VIOLATION_COLOR, scale=0.42)
-
-        # ── Layer 3: Bbox Person ──────────────────────────────────────────
+        # ── Layer 2: Bbox Person ──────────────────────────────────────────
         for det in person_dets:
             x1, y1, x2, y2 = det.bbox
             ppe_status   = get_person_ppe_dict(det, detections, frame_height=h)
@@ -491,11 +474,10 @@ class APDInferencePipeline:
 
             # Label APD yang hilang
             missing = []
-            if not ppe_status.get("helmet",  False): missing.append("X Helm")
-            if not ppe_status.get("vest",    False): missing.append("X Rompi")
-            if not ppe_status.get("boots",   False): missing.append("X Boots")
-            if not ppe_status.get("goggles", False): missing.append("X Goggle")
-            if not ppe_status.get("gloves",  False): missing.append("X Gloves")
+            if not ppe_status.get("helmet", False): missing.append("X Helm")
+            if not ppe_status.get("vest",   False): missing.append("X Rompi")
+            if not ppe_status.get("boots",  False): missing.append("X Boots")
+            if not ppe_status.get("gloves", False): missing.append("X Gloves")
 
             label = f"Person {det.confidence:.2f}"
             if partial:
@@ -505,27 +487,26 @@ class APDInferencePipeline:
 
             self._draw_label(vis, label, x1, y1, color)
 
-        # ── Layer 4: Panel info kiri atas ─────────────────────────────────
+        # ── Layer 3: Panel info kiri atas ─────────────────────────────────
         ov = vis.copy()
-        cv2.rectangle(ov, (0, 0), (330, 130), (15, 15, 15), -1)
+        cv2.rectangle(ov, (0, 0), (330, 120), (15, 15, 15), -1)
         cv2.addWeighted(ov, 0.70, vis, 0.30, 0, vis)
 
-        total_viol  = self.violation_logic.stats["total_events"]
-        neg_hits    = self.violation_logic.stats.get("neg_class_hits", 0)
-        pos_hits    = self.violation_logic.stats.get("pos_absent_hits", 0)
+        total_viol = self.violation_logic.stats["total_events"]
+        pos_hits   = self.violation_logic.stats.get("pos_absent_hits", 0)
         lines = [
             f"Camera  : {self.camera_id}",
             f"Frame   : {self.frame_count}  |  FPS: {self.fps_display:.1f}",
             f"Person  : {len(person_dets)}  |  Total Viol: {total_viol}",
-            f"NegCls  : {neg_hits}  |  PosAbs: {pos_hits}",
+            f"PosAbs  : {pos_hits}  |  Mode: B-only (5-class)",
             f"Conf    : {self.conf}  |  NMS: {NMS_IOU_THRESHOLD}",
-            f"Model   : {'ONNX' if self.use_onnx else 'PT'} | Epson K3 v5.0",
+            f"Model   : {'ONNX' if self.use_onnx else 'PT'} | Epson K3 v6.0",
         ]
         for i, ln in enumerate(lines):
             cv2.putText(vis, ln, (8, 20 + i * 19),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 220, 220), 1, cv2.LINE_AA)
 
-        # ── Layer 5: Panel status K3 kanan atas (5 APD Epson) ───────────
+        # ── Layer 4: Panel status K3 kanan atas (4 APD Epson) ────────────
         STATUS_STYLE = {
             "COMPLIANT": ("Patuh   ", COMPLIANT_COLOR),
             "VIOLATION": ("LANGGAR!", VIOLATION_COLOR),
@@ -548,12 +529,10 @@ class APDInferencePipeline:
             cv2.putText(vis, f"{lbl}: {text}", (px, 36 + i * 26),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.56, color, 2, cv2.LINE_AA)
 
-        # ── Layer 6: Banner pelanggaran bawah ─────────────────────────────
+        # ── Layer 5: Banner pelanggaran bawah ─────────────────────────────
         if events:
-            # Tampilkan semua tipe pelanggaran unik
             unique_types = list({e.violation_type for e in events})
-            names = ", ".join(t.replace("_", " ").upper() for t in unique_types)
-            modes = list({e.detection_mode[:3].upper() for e in events})
+            names        = ", ".join(t.replace("_", " ").upper() for t in unique_types)
 
             ov3 = vis.copy()
             cv2.rectangle(ov3, (0, h - 60), (w, h), (0, 0, 140), -1)
@@ -561,7 +540,7 @@ class APDInferencePipeline:
             cv2.putText(vis, f"  PELANGGARAN: {names}",
                         (8, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.68,
                         (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(vis, f"  Deteksi via: {' + '.join(modes)} mode  |  {len(events)} event(s)",
+            cv2.putText(vis, f"  Deteksi: pos_absent mode  |  {len(events)} event(s)",
                         (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
                         (180, 180, 180), 1, cv2.LINE_AA)
 
@@ -632,12 +611,12 @@ class APDInferencePipeline:
                     break
 
                 self.frame_count += 1
-                elapsed          = time.perf_counter() - t_start
-                self.fps_display = self.frame_count / elapsed if elapsed > 0 else 0.0
+                elapsed           = time.perf_counter() - t_start
+                self.fps_display  = self.frame_count / elapsed if elapsed > 0 else 0.0
 
                 if self.frame_count % self.skip_frames != 0:
                     if show_preview:
-                        cv2.imshow("APD Monitor Epson K3 v5.0 [Q=quit]", frame)
+                        cv2.imshow("APD Monitor Epson K3 v6.0 [Q=quit]", frame)
                         if cv2.waitKey(1) & 0xFF == ord("q"):
                             break
                     continue
@@ -645,7 +624,7 @@ class APDInferencePipeline:
                 vis = self._process_frame(frame)
 
                 if show_preview:
-                    cv2.imshow("APD Monitor Epson K3 v5.0 [Q=quit]", vis)
+                    cv2.imshow("APD Monitor Epson K3 v6.0 [Q=quit]", vis)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         print("\n[INFO] Dihentikan pengguna.")
                         break
@@ -682,8 +661,8 @@ class APDInferencePipeline:
                     continue
 
                 self.frame_count += 1
-                elapsed          = time.perf_counter() - t_start
-                self.fps_display = self.frame_count / elapsed if elapsed > 0 else 0.0
+                elapsed           = time.perf_counter() - t_start
+                self.fps_display  = self.frame_count / elapsed if elapsed > 0 else 0.0
 
                 if save_video and writer is None:
                     hh, ww = frame.shape[:2]
@@ -692,7 +671,7 @@ class APDInferencePipeline:
                 vis = self._process_frame(frame)
 
                 if show_preview:
-                    cv2.imshow("APD Monitor Epson K3 v5.0 - Folder [Q=quit]", vis)
+                    cv2.imshow("APD Monitor Epson K3 v6.0 - Folder [Q=quit]", vis)
                     if cv2.waitKey(30) & 0xFF == ord("q"):
                         break
 
@@ -719,19 +698,19 @@ class APDInferencePipeline:
 
     def _print_banner(self):
         print(f"\n{'='*65}")
-        print(f"  APD Inference Pipeline v5.0 — YOLOv11 | Epson Factory K3")
-        print(f"  11 Classes: helmet|gloves|vest|boots|goggles|none|Person")
-        print(f"              no_helmet|no_goggle|no_gloves|no_boots")
-        print(f"  Detection: DUAL MODE (negative class + positive absent)")
-        print(f"  Standard : Epson K3 — 5 APD Wajib")
+        print(f"  APD Inference Pipeline v6.0 — YOLOv11 | Epson Factory K3")
+        print(f"  5 Classes : person | helmet | safety-vest | gloves | shoes")
+        print(f"  Internal  : Person | helmet | vest        | gloves | boots")
+        print(f"  Detection : Mode B only (positive absent)")
+        print(f"  Standard  : Epson K3 — 4 APD Wajib")
         print(f"{'='*65}")
 
     def _print_summary(self):
         print(f"\n\n{'='*65}")
-        print(f"  RINGKASAN INFERENCE  [v5.0 Epson K3]")
+        print(f"  RINGKASAN INFERENCE  [v6.0 Epson K3 | 5-Class]")
         print(f"{'='*65}")
         print(f"  Total frame diproses : {self.frame_count}")
-        print(f"\n  Deteksi per kelas:")
+        print(f"\n  Deteksi per kelas (internal names):")
         for cname, count in self.class_count.items():
             if count > 0:
                 bar = "█" * min(count // 10, 28)
@@ -745,22 +724,22 @@ class APDInferencePipeline:
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="APD Inference v5.0 — Epson Factory K3 | 11-Class Dual Detection",
+        description="APD Inference v6.0 — Epson Factory K3 | 5-Class Positive-Only",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Contoh:
-  python inference.py --source 0 --model best.pt --no-backend
-  python inference.py --source video.mp4 --model best.pt --skip 2 --no-backend
-  python inference.py --source rtsp://192.168.1.100:554/stream --model best.pt
-  python inference.py --source 0 --model best.pt --conf 0.35 --no-backend
-  python inference.py --source 0 --model best.pt --save-video out.mp4 --no-backend
-  python inference.py --source 0 --model best.onnx --use-onnx --no-backend
-  python inference.py --source video.mp4 --model best.pt --camera-id EPSON_LINE_A
+  python inference.py --source 0 --model bestDevaLatest.pt --no-backend
+  python inference.py --source video.mp4 --model bestDevaLatest.pt --skip 2 --no-backend
+  python inference.py --source rtsp://192.168.1.100:554/stream --model bestDevaLatest.pt
+  python inference.py --source 0 --model bestDevaLatest.pt --conf 0.35 --no-backend
+  python inference.py --source 0 --model bestDevaLatest.pt --save-video out.mp4 --no-backend
+  python inference.py --source 0 --model bestDevaLatest.onnx --use-onnx --no-backend
+  python inference.py --source video.mp4 --model bestDevaLatest.pt --camera-id EPSON_LINE_A
         """,
     )
     p.add_argument("--source",      required=True,
                    help="Sumber: 0=webcam, path video, RTSP URL")
-    p.add_argument("--model",       default="bestArbi.pt",
+    p.add_argument("--model",       default="bestDevaLatest.pt",
                    help="Path model (.pt atau .onnx)")
     p.add_argument("--conf",        type=float, default=0.30,
                    help="Minimum confidence (default: 0.30)")

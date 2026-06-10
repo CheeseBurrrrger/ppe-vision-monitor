@@ -17,7 +17,7 @@ const PPE_LABELS = {
   no_vest:    "Rompi",
   no_helmet:  "Helm",
   no_boots:   "Sepatu",
-  no_gloves:  "Srt Tgn",
+  no_gloves:  "Sarung Tangan",
   no_goggles: "Goggle",
 };
 
@@ -62,7 +62,7 @@ const ChartsSection = () => {
     Helm:      row.no_helmet  ?? 0,
     Rompi:     row.no_vest    ?? 0,
     Sepatu:    row.no_boots   ?? 0,
-    "Srt Tgn": row.no_gloves  ?? 0,
+    "Sarung Tangan": row.no_gloves  ?? 0,
     Goggle:    row.no_goggles ?? 0,
   }));
 
@@ -114,7 +114,7 @@ const ChartsSection = () => {
                   <Bar dataKey="Rompi"    fill="#22C55E" radius={[2,2,0,0]} barSize={8} />
                   <Bar dataKey="Helm"     fill="#FACC15" radius={[2,2,0,0]} barSize={8} />
                   <Bar dataKey="Sepatu"   fill="#92400E" radius={[2,2,0,0]} barSize={8} />
-                  <Bar dataKey="Srt Tgn"  fill="#0250C5" radius={[2,2,0,0]} barSize={8} />
+                  <Bar dataKey="Sarung Tangan"  fill="#0250C5" radius={[2,2,0,0]} barSize={8} />
                   <Bar dataKey="Goggle"   fill="#F97316" radius={[2,2,0,0]} barSize={8} />
                 </BarChart>
               </ResponsiveContainer>

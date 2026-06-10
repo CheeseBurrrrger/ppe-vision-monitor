@@ -1,28 +1,29 @@
 """
-violation_logic.py  [v5.0 — Epson Factory K3 | 11-Class Dual Detection]
+violation_logic.py  [v6.0 — Epson Factory K3 | 5-Class Positive-Only]
 =========================================================================
-Logika deteksi pelanggaran K3 untuk model YOLOv11 best.pt (11 kelas).
+Logika deteksi pelanggaran K3 untuk model bestDevaLatest.pt (5 kelas).
 
-Kelas model best.pt (AKTUAL hasil inspect):
-    0: helmet        → APD hadir: helm
-    1: gloves        → APD hadir: sarung tangan
-    2: vest          → APD hadir: rompi
-    3: boots         → APD hadir: sepatu safety
-    4: goggles       → APD hadir: kacamata pelindung
-    5: none          → Tidak ada APD terdeteksi (area kosong)
-    6: Person        → Deteksi orang
-    7: no_helmet     → LANGSUNG: orang tanpa helm (negative class)
-    8: no_goggle     → LANGSUNG: orang tanpa goggle (negative class)
-    9: no_gloves     → LANGSUNG: orang tanpa sarung tangan (negative class)
-   10: no_boots      → LANGSUNG: orang tanpa sepatu (negative class)
+Kelas model AKTUAL (bestDevaLatest.pt):
+    0: person        → Deteksi orang
+    1: helmet        → APD hadir: helm
+    2: safety-vest   → APD hadir: rompi
+    3: gloves        → APD hadir: sarung tangan
+    4: shoes         → APD hadir: sepatu safety
 
-Strategi Deteksi v5.0 — DUAL MODE (lebih akurat):
-  MODE A (PRIMER)  : Kelas negatif (no_helmet, no_goggle, dll) langsung = LANGGAR
-  MODE B (SEKUNDER): Kelas positif tidak ditemukan di sekitar Person = LANGGAR
-  Jika salah satu mode mendeteksi pelanggaran → status VIOLATION
+Normalisasi nama internal:
+    "person"       → "Person"
+    "safety-vest"  → "vest"
+    "shoes"        → "boots"
+
+Strategi Deteksi v6.0 — MODE B ONLY (positive absent):
+  Model ini tidak memiliki kelas negatif (no_helmet, dll).
+  Deteksi pelanggaran dilakukan dengan mengecek apakah APD positif
+  ditemukan secara spasial di sekitar bbox Person.
+  Jika APD tidak ditemukan → VIOLATION.
 
 Standard K3 Epson Factory:
-  Wajib: Helm, Rompi, Sepatu Safety, Goggle, Sarung Tangan
+  Wajib: Helm, Rompi, Sepatu Safety, Sarung Tangan
+  Catatan: Goggle TIDAK ada di model ini — dihapus dari standar
   Partial Person: Sepatu & Sarung Tangan tidak diwajibkan
 """
 
@@ -45,48 +46,45 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────
-#  KELAS MODEL — 11 kelas dari best.pt (v5.0)
+#  NORMALISASI NAMA KELAS MODEL → NAMA INTERNAL
+#  Model output name  →  Internal name
 # ─────────────────────────────────────────────
 
+# Raw class IDs dari model bestDevaLatest.pt
 CLASS_NAMES: Dict[int, str] = {
-    0:  "helmet",
-    1:  "gloves",
-    2:  "vest",
-    3:  "boots",
-    4:  "goggles",
-    5:  "none",
-    6:  "Person",
-    7:  "no_helmet",
-    8:  "no_goggle",
-    9:  "no_gloves",
-    10: "no_boots",
+    0: "Person",   # model: "person"       → normalized
+    1: "helmet",   # model: "helmet"       → same
+    2: "vest",     # model: "safety-vest"  → normalized
+    3: "gloves",   # model: "gloves"       → same
+    4: "boots",    # model: "shoes"        → normalized
 }
 
-# Kelas APD positif (pakai APD)
-PPE_POSITIVE_CLASSES = {"helmet", "gloves", "vest", "boots", "goggles"}
-
-# Kelas APD negatif (tidak pakai APD) → langsung trigger violation
-PPE_NEGATIVE_CLASSES = {"no_helmet", "no_goggle", "no_gloves", "no_boots"}
-
-# Mapping: kelas negatif → kelas positif pasangannya
-NEGATIVE_TO_POSITIVE: Dict[str, str] = {
-    "no_helmet": "helmet",
-    "no_goggle":  "goggles",
-    "no_gloves":  "gloves",
-    "no_boots":   "boots",
+# Mapping dari nama raw model → nama internal
+# Digunakan di inference.py saat membaca output YOLO
+MODEL_NAME_MAP: Dict[str, str] = {
+    "person":      "Person",
+    "helmet":      "helmet",
+    "safety-vest": "vest",
+    "gloves":      "gloves",
+    "shoes":       "boots",
 }
 
-# Mapping: kelas positif → nama APD display
+# Kelas APD positif (internal names)
+PPE_POSITIVE_CLASSES = {"helmet", "gloves", "vest", "boots"}
+
+# Tidak ada kelas negatif di model ini
+PPE_NEGATIVE_CLASSES: set = set()
+
+# Mapping display untuk UI/log
 PPE_DISPLAY_NAMES: Dict[str, str] = {
-    "helmet":  "Helm",
-    "gloves":  "Sarung Tangan",
-    "vest":    "Rompi",
-    "boots":   "Sepatu Safety",
-    "goggles": "Goggle",
+    "helmet": "Helm",
+    "gloves": "Sarung Tangan",
+    "vest":   "Rompi",
+    "boots":  "Sepatu Safety",
 }
 
-# APD wajib sesuai standar Epson Factory K3
-REQUIRED_PPE = ["helmet", "vest", "boots", "goggles", "gloves"]
+# APD wajib sesuai standar Epson Factory K3 (goggle dihapus — tidak ada di model)
+REQUIRED_PPE = ["helmet", "vest", "boots", "gloves"]
 
 # APD yang dikecualikan saat person partial (hanya terlihat sebagian)
 PARTIAL_EXEMPT_PPE = {"boots", "gloves"}
@@ -100,78 +98,60 @@ ALL_PPE = REQUIRED_PPE
 
 # Zona Y relatif terhadap tinggi bbox Person (top=0.0, bottom=1.0)
 Y_ZONES: Dict[str, Tuple[float, float]] = {
-    "helmet":  (0.00, 0.40),   # kepala
-    "goggles": (0.00, 0.40),   # mata/kepala
-    "vest":    (0.20, 0.80),   # badan
-    "gloves":  (0.35, 1.00),   # tangan ke bawah
-    "boots":   (0.60, 1.00),   # kaki
-    # Kelas negatif memakai zona yang sama dengan pasangannya
-    "no_helmet": (0.00, 0.55),
-    "no_goggle": (0.00, 0.55),
-    "no_gloves": (0.30, 1.00),
-    "no_boots":  (0.55, 1.00),
+    "helmet": (0.00, 0.40),   # kepala
+    "vest":   (0.20, 0.80),   # badan
+    "gloves": (0.35, 1.00),   # tangan ke bawah
+    "boots":  (0.60, 1.00),   # kaki
 }
 
 MIN_OVERLAP:          float = 0.20   # minimum IoU untuk fallback detection
 PARTIAL_PERSON_RATIO: float = 0.40   # bbox person < 40% tinggi frame = partial
 MIN_PERSON_CONF:      float = 0.30
-MIN_PPE_CONF:         float = 0.25   # lebih rendah untuk negative class
-MIN_NEG_CONF:         float = 0.30   # minimum conf untuk negative class trigger
+MIN_PPE_CONF:         float = 0.25
 
+# Panel labels untuk overlay UI
 PANEL_LABELS: Dict[str, str] = {
-    "helmet":  "Helm    ",
-    "vest":    "Rompi   ",
-    "boots":   "Sepatu  ",
-    "goggles": "Goggle  ",
-    "gloves":  "Gloves  ",
+    "helmet": "Helm    ",
+    "vest":   "Rompi   ",
+    "boots":  "Sepatu  ",
+    "gloves": "Gloves  ",
 }
 
 # ── Warna BGR ──
-VIOLATION_COLOR  = (0,   0, 255)     # merah cerah
-COMPLIANT_COLOR  = (0, 200,   0)     # hijau
-UNKNOWN_COLOR    = (130, 130, 130)   # abu-abu
-WARNING_COLOR    = (0,  165, 255)    # oranye (partial)
+VIOLATION_COLOR = (0,   0, 255)     # merah cerah
+COMPLIANT_COLOR = (0, 200,   0)     # hijau
+UNKNOWN_COLOR   = (130, 130, 130)   # abu-abu
+WARNING_COLOR   = (0,  165, 255)    # oranye (partial)
 
 BACKEND_URL     = "http://localhost:8000"
 BACKEND_TIMEOUT = 5
 
 
 # ─────────────────────────────────────────────
-#  VIOLATION RULES — Epson K3 Standard
+#  VIOLATION RULES — Epson K3 Standard (4 APD)
 # ─────────────────────────────────────────────
 
 VIOLATION_RULES: Dict[str, dict] = {
     "no_helmet": {
         "ppe_class":   "helmet",
-        "neg_class":   "no_helmet",
         "description": "Pekerja tidak menggunakan helm safety",
         "severity":    "HIGH",
         "cooldown":    12,
     },
     "no_vest": {
         "ppe_class":   "vest",
-        "neg_class":   None,           # tidak ada kelas negatif untuk vest
         "description": "Pekerja tidak menggunakan rompi safety (vest)",
         "severity":    "HIGH",
         "cooldown":    12,
     },
     "no_boots": {
         "ppe_class":   "boots",
-        "neg_class":   "no_boots",
         "description": "Pekerja tidak menggunakan sepatu safety",
         "severity":    "HIGH",
         "cooldown":    20,
     },
-    "no_goggles": {
-        "ppe_class":   "goggles",
-        "neg_class":   "no_goggle",
-        "description": "Pekerja tidak menggunakan kacamata pelindung (goggle)",
-        "severity":    "HIGH",
-        "cooldown":    12,
-    },
     "no_gloves": {
         "ppe_class":   "gloves",
-        "neg_class":   "no_gloves",
         "description": "Pekerja tidak menggunakan sarung tangan safety",
         "severity":    "MEDIUM",
         "cooldown":    20,
@@ -187,7 +167,8 @@ VIOLATION_RULES: Dict[str, dict] = {
 class Detection:
     """
     Satu deteksi dari YOLO.
-    bbox WAJIB dalam koordinat frame ASLI (sudah di-scale).
+    class_name menggunakan nama INTERNAL (sudah dinormalisasi).
+    bbox dalam koordinat frame ASLI (sudah di-scale).
     """
     class_name: str
     confidence: float
@@ -206,7 +187,7 @@ class ViolationEvent:
     bbox:            dict
     frame_number:    int
     frame_path:      Optional[str]
-    detection_mode:  str           # "negative_class" atau "positive_absent"
+    detection_mode:  str           # selalu "positive_absent" di v6.0
     sent_to_backend: bool = False
 
     def to_payload(self) -> dict:
@@ -260,7 +241,7 @@ def is_partial_person(person_bbox: tuple, frame_height: int) -> bool:
 
 
 # ─────────────────────────────────────────────
-#  VALIDASI SPASIAL — PPE POSITIF
+#  VALIDASI SPASIAL — PPE POSITIF (Mode B Only)
 # ─────────────────────────────────────────────
 
 def person_has_ppe_positive(
@@ -270,8 +251,12 @@ def person_has_ppe_positive(
     frame_height:   Optional[int] = None,
 ) -> bool:
     """
-    Cek apakah ada deteksi APD positif (helmet, vest, dll) yang
-    secara spasial valid di dalam bbox person.
+    Cek apakah ada deteksi APD positif yang secara spasial valid
+    di dalam bbox person.
+
+    Dua tahap validasi:
+      1. Center APD berada dalam bbox person AND dalam zona Y yang sesuai
+      2. Fallback: overlap ratio >= MIN_OVERLAP (untuk bbox terpotong tepi frame)
     """
     px1, py1, px2, py2 = person_bbox
     ph = py2 - py1
@@ -304,84 +289,27 @@ def person_has_ppe_positive(
     return False
 
 
-def person_has_negative_ppe(
-    person_bbox:    tuple,
-    all_detections: List[Detection],
-    neg_class:      str,
-) -> bool:
-    """
-    Cek apakah ada kelas negatif (no_helmet, no_goggle, dll) yang
-    secara spasial berada di dalam/dekat bbox person.
-    Ini MODE PRIMER — lebih cepat dan akurat.
-    """
-    if neg_class is None:
-        return False
-
-    px1, py1, px2, py2 = person_bbox
-    ph = py2 - py1
-    if ph <= 0:
-        return False
-
-    y_lo, y_hi = Y_ZONES.get(neg_class, (0.0, 1.0))
-    zone_y_min = py1 + y_lo * ph
-    zone_y_max = py1 + y_hi * ph
-
-    for det in all_detections:
-        if det.class_name != neg_class:
-            continue
-        if det.confidence < MIN_NEG_CONF:
-            continue
-
-        cx, cy = bbox_center(det.bbox)
-
-        # Check spasial — center di dalam bbox person
-        if px1 <= cx <= px2 and py1 <= cy <= py2:
-            if zone_y_min <= cy <= zone_y_max:
-                return True
-
-        # Fallback overlap
-        if (overlap_ratio(det.bbox, person_bbox) >= MIN_OVERLAP
-                and zone_y_min <= cy <= zone_y_max):
-            return True
-
-    return False
-
-
 def get_person_ppe_dict(
     person_det:     Detection,
     all_detections: List[Detection],
     frame_height:   Optional[int] = None,
 ) -> Dict[str, bool]:
     """
-    Status semua APD untuk satu Person.
-    Menggunakan dual-mode detection:
-      - True jika PPE positif ditemukan DAN tidak ada negatif
-      - False jika ada kelas negatif ATAU PPE positif tidak ditemukan
+    Status semua APD untuk satu Person (Mode B: positive absent only).
+
+    Return: {ppe_class: True (patuh) / False (langgar)}
     Partial person: boots dan gloves otomatis True.
     """
     ppe_dets = [d for d in all_detections if d.class_name in PPE_POSITIVE_CLASSES]
-    neg_dets = [d for d in all_detections if d.class_name in PPE_NEGATIVE_CLASSES]
 
     result = {}
     for ppe in ALL_PPE:
-        # Cek kelas negatif (primer)
-        neg_cls = NEGATIVE_TO_POSITIVE.get(ppe)       # dapatkan neg_class dari mapping
-        # Balik mapping: PPE positif → neg class
-        neg_for_ppe = None
-        for neg_k, pos_v in NEGATIVE_TO_POSITIVE.items():
-            if pos_v == ppe:
-                neg_for_ppe = neg_k
-                break
-
-        has_negative = person_has_negative_ppe(person_det.bbox, neg_dets, neg_for_ppe)
-        has_positive = person_has_ppe_positive(person_det.bbox, ppe_dets, ppe, frame_height)
-
-        if has_negative:
-            result[ppe] = False      # langgar: kelas negatif terdeteksi
-        elif has_positive:
-            result[ppe] = True       # patuh: APD ditemukan
-        else:
-            result[ppe] = False      # tidak ada sinyal positif = anggap tidak pakai
+        result[ppe] = person_has_ppe_positive(
+            person_bbox    = person_det.bbox,
+            ppe_detections = ppe_dets,
+            ppe_class      = ppe,
+            frame_height   = frame_height,
+        )
 
     # Partial person exemption
     if frame_height and is_partial_person(person_det.bbox, frame_height):
@@ -403,7 +331,7 @@ class ViolationLogic:
         output_dir:       str           = "violation_output",
         save_screenshots: bool          = True,
         log_to_file:      bool          = True,
-        backend_url:      Optional[str] = "https://localhost:8000",
+        backend_url:      Optional[str] = "http://localhost:8000",
     ):
         self.camera_id        = camera_id
         self.save_screenshots = save_screenshots
@@ -417,7 +345,7 @@ class ViolationLogic:
         if log_to_file:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.log_file             = self.output_dir / "violations.jsonl"
+        self.log_file                     = self.output_dir / "violations.jsonl"
         self._last_event_time: Dict[str, float] = {}
         self.stats = {
             "total_events":     0,
@@ -425,13 +353,12 @@ class ViolationLogic:
             "sent_backend":     0,
             "fail_backend":     0,
             "frames_processed": 0,
-            "neg_class_hits":   0,   # berapa kali deteksi dari kelas negatif
-            "pos_absent_hits":  0,   # berapa kali dari absennya kelas positif
+            "pos_absent_hits":  0,   # semua deteksi via positive absent (Mode B)
         }
         logger.info(
-            f"ViolationLogic v5.0 Epson K3 | cam={camera_id} | "
+            f"ViolationLogic v6.0 Epson K3 | cam={camera_id} | "
             f"backend={'ON → ' + backend_url if backend_url else 'OFF'} | "
-            f"classes=11 | required_ppe={len(REQUIRED_PPE)}"
+            f"model=5-class positive-only | required_ppe={len(REQUIRED_PPE)}"
         )
 
     def process(
@@ -442,14 +369,14 @@ class ViolationLogic:
     ) -> List[ViolationEvent]:
         """
         Proses satu frame, return list ViolationEvent.
-        Dual-mode: negative class PRIMER, positive absent SEKUNDER.
+        Mode B only: cek apakah APD positif absen di sekitar Person.
         """
         self.stats["frames_processed"] += 1
         events: List[ViolationEvent] = []
 
         fh          = frame.shape[0] if hasattr(frame, "shape") else None
         person_dets = [d for d in detections if d.class_name == "Person"]
-        all_dets    = [d for d in detections if d.class_name != "Person"]
+        ppe_dets    = [d for d in detections if d.class_name in PPE_POSITIVE_CLASSES]
 
         if not person_dets:
             return events
@@ -467,32 +394,27 @@ class ViolationLogic:
                 if self._in_cooldown(vtype, rule["cooldown"]):
                     continue
 
-                # ─── MODE A: Deteksi kelas negatif (PRIMER) ───
-                neg_cls       = rule.get("neg_class")
-                neg_dets_only = [d for d in all_dets if d.class_name in PPE_NEGATIVE_CLASSES]
-                has_neg       = person_has_negative_ppe(person.bbox, neg_dets_only, neg_cls)
+                has_pos = person_has_ppe_positive(
+                    person_bbox    = person.bbox,
+                    ppe_detections = ppe_dets,
+                    ppe_class      = rule["ppe_class"],
+                    frame_height   = fh,
+                )
 
-                # ─── MODE B: Absennya kelas positif (SEKUNDER) ───
-                ppe_dets_only = [d for d in all_dets if d.class_name in PPE_POSITIVE_CLASSES]
-                has_pos       = person_has_ppe_positive(person.bbox, ppe_dets_only, rule["ppe_class"], fh)
-
-                is_violation  = has_neg or (not has_pos)
-                detect_mode   = "negative_class" if has_neg else "positive_absent"
-
-                if is_violation:
-                    ev = self._make_event(vtype, rule, person, frame, frame_number, detect_mode)
+                if not has_pos:
+                    ev = self._make_event(
+                        vtype, rule, person, frame, frame_number,
+                        detect_mode="positive_absent"
+                    )
                     events.append(ev)
                     self._last_event_time[vtype]  = time.time()
                     self.stats["total_events"]    += 1
                     self.stats["per_type"][vtype] += 1
-                    if has_neg:
-                        self.stats["neg_class_hits"] += 1
-                    else:
-                        self.stats["pos_absent_hits"] += 1
+                    self.stats["pos_absent_hits"] += 1
 
                     logger.warning(
                         f"PELANGGARAN | {vtype:12s} | {rule['severity']:6s} | "
-                        f"mode={detect_mode[:3]} | "
+                        f"mode=pos_absent | "
                         f"conf={person.confidence:.2f}"
                         f"{' [partial]' if partial else ''} | fr={frame_number}"
                     )
@@ -549,7 +471,9 @@ class ViolationLogic:
     def _in_cooldown(self, vtype: str, cooldown: float) -> bool:
         return (time.time() - self._last_event_time.get(vtype, 0.0)) < cooldown
 
-    def _make_event(self, vtype, rule, person, frame, frame_number, detect_mode) -> ViolationEvent:
+    def _make_event(
+        self, vtype, rule, person, frame, frame_number, detect_mode
+    ) -> ViolationEvent:
         now  = time.time()
         dt   = datetime.fromtimestamp(now, tz=timezone.utc)
         x1, y1, x2, y2 = person.bbox
@@ -576,10 +500,16 @@ class ViolationLogic:
         cv2.rectangle(shot, (x1, y1), (x2, y2), VIOLATION_COLOR, 3)
         header_h = 70
         cv2.rectangle(shot, (0, 0), (shot.shape[1], header_h), (0, 0, 140), -1)
-        cv2.putText(shot, f"EPSON K3 VIOLATION: {vtype.upper().replace('_',' ')}",
-                    (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.80, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(shot, dt.strftime("%Y-%m-%d  %H:%M:%S UTC  |  " + self.camera_id),
-                    (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(
+            shot,
+            f"EPSON K3 VIOLATION: {vtype.upper().replace('_', ' ')}",
+            (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.80, (255, 255, 255), 2, cv2.LINE_AA
+        )
+        cv2.putText(
+            shot,
+            dt.strftime("%Y-%m-%d  %H:%M:%S UTC  |  " + self.camera_id),
+            (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 200, 200), 1, cv2.LINE_AA
+        )
         fname = f"{vtype}_{dt.strftime('%Y%m%d_%H%M%S')}.jpg"
         path  = self.screenshot_dir / fname
         cv2.imwrite(str(path), shot, [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -609,13 +539,12 @@ class ViolationLogic:
 
     def print_summary(self):
         sep = "=" * 62
-        print(f"\n{sep}\n  RINGKASAN SESI  [ViolationLogic v5.0 — Epson K3]")
+        print(f"\n{sep}\n  RINGKASAN SESI  [ViolationLogic v6.0 — Epson K3 | 5-Class]")
         print(sep)
         print(f"  Camera          : {self.camera_id}")
         print(f"  Frames diproses : {self.stats['frames_processed']}")
         print(f"  Total pelanggaran: {self.stats['total_events']}")
-        print(f"    via neg.class : {self.stats['neg_class_hits']}")
-        print(f"    via pos.absent: {self.stats['pos_absent_hits']}")
+        print(f"    via pos.absent : {self.stats['pos_absent_hits']}")
         print(f"\n  Detail per tipe:")
         for vtype, n in self.stats["per_type"].items():
             sev = VIOLATION_RULES[vtype]["severity"]
@@ -633,13 +562,13 @@ class ViolationLogic:
 
 if __name__ == "__main__":
     import numpy as np
-    print("\n=== TEST violation_logic.py v5.0 — Epson K3 ===\n")
+    print("\n=== TEST violation_logic.py v6.0 — Epson K3 | 5-Class ===\n")
     H, W  = 480, 640
     frame = np.zeros((H, W, 3), dtype=np.uint8)
     logic = ViolationLogic(
-        camera_id  = "EPSON_TEST",
-        output_dir = "test_out_v5",
-        backend_url= None,
+        camera_id   = "EPSON_TEST",
+        output_dir  = "test_out_v6",
+        backend_url = None,
     )
 
     print("TEST 1 — bbox_center() benar")
@@ -647,61 +576,65 @@ if __name__ == "__main__":
     assert cx == 200.0 and cy == 125.0, "FAIL"
     print(f"  ✓ bbox_center → ({cx}, {cy})")
 
-    print("\nTEST 2 — Semua APD lengkap (positive class) → 0 event")
+    print("\nTEST 2 — Semua APD lengkap → 0 event")
     logic._last_event_time = {}
     ev = logic.process([
-        Detection("Person",  0.92, (100,  30, 400, 460)),
-        Detection("helmet",  0.88, (150,  40, 360, 130)),
-        Detection("vest",    0.85, (110, 150, 390, 320)),
-        Detection("gloves",  0.82, (110, 210, 230, 300)),
-        Detection("boots",   0.80, (120, 360, 380, 455)),
-        Detection("goggles", 0.78, (155,  42, 355, 100)),
+        Detection("Person", 0.92, (100,  30, 400, 460)),
+        Detection("helmet", 0.88, (150,  40, 360, 130)),
+        Detection("vest",   0.85, (110, 150, 390, 320)),
+        Detection("gloves", 0.82, (110, 210, 230, 300)),
+        Detection("boots",  0.80, (120, 360, 380, 455)),
     ], frame, 1)
     print(f"  Events: {len(ev)}  (expected 0)")
     assert len(ev) == 0, f"FAIL: {[e.violation_type for e in ev]}"
     print("  ✓ PASS")
 
-    print("\nTEST 3 — Kelas negatif no_helmet → langsung violation")
+    print("\nTEST 3 — Helm tidak ada → violation no_helmet")
     logic._last_event_time = {}
     ev = logic.process([
-        Detection("Person",    0.91, (100, 30, 400, 460)),
-        Detection("no_helmet", 0.85, (140, 35, 370, 120)),   # deteksi langsung
-        Detection("vest",      0.85, (110,150, 390, 320)),
-        Detection("goggles",   0.78, (155, 42, 355, 100)),
+        Detection("Person", 0.91, (100, 30, 400, 460)),
+        Detection("vest",   0.85, (110, 150, 390, 320)),
+        Detection("gloves", 0.82, (110, 210, 230, 300)),
+        Detection("boots",  0.80, (120, 360, 380, 455)),
     ], frame, 2)
-    print(f"  Events: {len(ev)}  (expected ≥1)")
-    neg_ev = [e for e in ev if e.violation_type == "no_helmet"]
-    assert len(neg_ev) >= 1
-    assert neg_ev[0].detection_mode == "negative_class", "Mode harus negative_class"
-    print(f"  ✓ PASS — mode={neg_ev[0].detection_mode}")
+    types = [e.violation_type for e in ev]
+    print(f"  Events: {types}  (expected ['no_helmet'])")
+    assert "no_helmet" in types, f"FAIL: {types}"
+    assert ev[0].detection_mode == "positive_absent"
+    print(f"  ✓ PASS — mode={ev[0].detection_mode}")
 
     print("\nTEST 4 — Partial person → boots & gloves dikecualikan")
     logic._last_event_time = {}
     ev = logic.process([
-        Detection("Person",  0.91, (100,  20, 400, 110)),   # h=90 < 40% dari 480
-        Detection("helmet",  0.88, (150,  25, 360,  75)),
-        Detection("vest",    0.85, (110,  55, 390, 105)),
-        Detection("goggles", 0.78, (155,  27, 355,  72)),
+        Detection("Person", 0.91, (100,  20, 400, 110)),   # h=90 < 40% dari 480
+        Detection("helmet", 0.88, (150,  25, 360,  75)),
+        Detection("vest",   0.85, (110,  55, 390, 105)),
     ], frame, 3)
     types = [e.violation_type for e in ev]
     assert "no_boots"  not in types, f"boots tidak boleh ada: {types}"
     assert "no_gloves" not in types, f"gloves tidak boleh ada: {types}"
     print(f"  ✓ PASS — events={types}")
 
-    print("\nTEST 5 — get_frame_status() dengan no_goggle → VIOLATION")
+    print("\nTEST 5 — get_frame_status() helm hilang → VIOLATION")
     logic._last_event_time = {}
     status = logic.get_frame_status([
-        Detection("Person",    0.91, (100, 30, 400, 460)),
-        Detection("no_goggle", 0.82, (150, 35, 360, 120)),
-        Detection("helmet",    0.88, (150, 40, 360, 130)),
-        Detection("vest",      0.85, (110,150, 390, 320)),
+        Detection("Person", 0.91, (100, 30, 400, 460)),
+        Detection("vest",   0.85, (110, 150, 390, 320)),
+        Detection("gloves", 0.82, (110, 210, 230, 300)),
+        Detection("boots",  0.80, (120, 360, 380, 455)),
     ], frame_height=H)
-    print(f"  goggles : {status.get('goggles')}  (expected VIOLATION)")
-    print(f"  helmet  : {status.get('helmet')}  (expected COMPLIANT)")
-    print(f"  vest    : {status.get('vest')}  (expected COMPLIANT)")
-    assert status["goggles"] == "VIOLATION"
-    assert status["helmet"]  == "COMPLIANT"
+    print(f"  helmet : {status.get('helmet')}  (expected VIOLATION)")
+    print(f"  vest   : {status.get('vest')}    (expected COMPLIANT)")
+    assert status["helmet"] == "VIOLATION"
+    assert status["vest"]   == "COMPLIANT"
     print("  ✓ PASS")
 
-    print("\n✅ Semua test PASSED — v5.0 Epson K3")
+    print("\nTEST 6 — MODEL_NAME_MAP normalisasi")
+    raw_names = ["person", "safety-vest", "shoes", "helmet", "gloves"]
+    normalized = [MODEL_NAME_MAP[n] for n in raw_names]
+    expected   = ["Person", "vest", "boots", "helmet", "gloves"]
+    assert normalized == expected, f"FAIL: {normalized}"
+    print(f"  ✓ PASS — {dict(zip(raw_names, normalized))}")
+
+    print("\n✅ Semua test PASSED — v6.0 Epson K3 | 5-Class Positive-Only")
     logic.print_summary()
