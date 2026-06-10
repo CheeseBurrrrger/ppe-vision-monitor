@@ -8,6 +8,7 @@ import FilterBar from "../components/FilterBar";
 // import LogTable from "../components/LogTable";
 import LiveCam from "../components/LiveCam";
 import DashboardCamFeed from "../components/DashboardCamFeed";
+import { useCameraDevices } from "../hooks/useCameraDevices";
 
 
 
@@ -15,6 +16,7 @@ export default function Dashboard() {
   // State untuk melacak menu mana yang aktif
   const [activeMenu, setActiveMenu] = useState("Dashboard");
   const [filters, setFilters] = useState({ type: "", shift: "", dateFrom: "", dateTo: "" });
+  const { cameraSlots, refresh } = useCameraDevices(3);
 
 
 return (
@@ -39,8 +41,17 @@ return (
               {/* Right: Live Camera Panel */}
               <div className="w-80 shrink-0 flex flex-col gap-4">
                 <h2 className="text-sm font-bold text-gray-700 uppercase tracking-widest">Live Camera</h2>
-                <DashboardCamFeed label="Ruang Produksi 1" deviceId="cd26da961a3c7ffe3c204755330cd0e6469921a3d39d50d69ce998faa0e4fd45" /> {/* laptop cam */}
-                <DashboardCamFeed label="Ruang Produksi 2" deviceId="31bc7ee16159013aa8efd2712f5f4824df9b62e3c1aaa208297860b056e22f3a" /> {/* droidcam */}
+                <DashboardCamFeed
+                  label="Ruang Produksi 1"
+                  device={cameraSlots[0]}
+                  allowDefaultCamera={!cameraSlots[0]?.deviceId}
+                  onStreamReady={refresh}
+                />
+                <DashboardCamFeed
+                  label="Ruang Produksi 2"
+                  device={cameraSlots[1]}
+                  onStreamReady={refresh}
+                />
               </div>
             </div>
           )}

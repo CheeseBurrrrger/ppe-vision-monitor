@@ -1,86 +1,90 @@
-import React, { useState, useEffect, useRef } from 'react';
 import { Camera, X, RefreshCw } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import DetectionCameraFeed from './DetectionCameraFeed';
+import { useCameraDevices } from '../hooks/useCameraDevices';
+
+const FLOOR_CAMERAS = [
+  { id: 'spraying-room', name: 'Spraying Room', top: '40%', left: '35%' },
+  { id: 'pipe-store', name: 'Pipe Store', top: '70%', left: '32%' },
+  { id: 'console-area', name: 'Console Area', top: '80%', left: '65%' },
+];
 
 export default function LiveCam() {
-  const [selectedCam, setSelectedCam] = useState(null);
-  const [timestamp, setTimestamp] = useState('');
-  const videoRef = useRef(null);
-  const cameras = [
-    { id: 1, name: 'Spraying Room', top: '40%', left: '35%' },
-    { id: 2, name: 'Pipe Store', top: '70%', left: '32%' },
-    { id: 3, name: 'Console Area', top: '80%', left: '65%' },
-  ];
-  useEffect(() => {
-    if (selectedCam) {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        console.warn("Camera unavailable (HTTPS required on non-localhost)");
-        return;
-      }
-      navigator.mediaDevices.getUserMedia({ video: true })
-        .then(stream => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-          }
-        })
-        .catch(err => console.error("Camera access error:", err));
-    }
-    
+  const [selectedCamId, setSelectedCamId] = useState(null);
+  const [streamVersion, setStreamVersion] = useState(0);
+  const { cameraSlots, status, error, refresh } = useCameraDevices(3);
+  const canRequestDefaultCamera = Boolean(navigator.mediaDevices?.getUserMedia);
 
-    // Cleanup: stop the stream when modal closes
-    return () => {
-      if (videoRef.current?.srcObject) {
-        videoRef.current.srcObject.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, [selectedCam]);
-  useEffect(() => {
-      if (!selectedCam) return;
-      const tick = () => setTimestamp(new Date().toLocaleString('id-ID', {
-        day: '2-digit', month: '2-digit', year: 'numeric',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hour12: false
-      }).replace(/\//g, '-'));
-      tick();
-      const interval = setInterval(tick, 1000);
-      return () => clearInterval(interval);
-    }, [selectedCam]);
+  const cameras = useMemo(
+    () =>
+      FLOOR_CAMERAS.map((camera, index) => ({
+        ...camera,
+        device: cameraSlots[index],
+        allowDefaultCamera: index === 0 && canRequestDefaultCamera && !cameraSlots[index]?.deviceId,
+        isOnline: Boolean(cameraSlots[index]?.deviceId) || (
+          index === 0 &&
+          canRequestDefaultCamera &&
+          status !== 'error'
+        ),
+      })),
+    [cameraSlots, canRequestDefaultCamera, status]
+  );
+
+  const selectedCam = cameras.find((camera) => camera.id === selectedCamId);
+  const onlineCount = cameras.filter((camera) => camera.isOnline).length;
+
+  const handleRefresh = () => {
+    refresh();
+    setStreamVersion((value) => value + 1);
+  };
 
   return (
     <div className="flex flex-col h-full space-y-4">
-      {/* Header Statis - Tetap di atas */}
-
-      {/* Container Denah - Mengisi sisa layar */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 flex-1 flex flex-col min-h-0 overflow-hidden">
-        <p className="text-[10px] text-gray-400 font-bold uppercase mb-4 tracking-widest italic shrink-0">
-          ● Click CCTV icon to stream camera
-        </p>
+        <div className="mb-4 flex shrink-0 items-center justify-between gap-3">
+          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest italic">
+            Click CCTV icon to stream camera
+          </p>
+          <div className="text-right">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500">
+              {status === 'loading' ? 'Scanning camera' : `${onlineCount}/3 camera online`}
+            </p>
+            {error && <p className="text-[10px] font-semibold text-red-500">{error}</p>}
+          </div>
+        </div>
 
-        {/* Wrapper Responsif: Membatasi lebar agar tidak melebar (stretch) di layar lebar */}
         <div className="flex-1 flex items-center justify-center overflow-hidden">
           <div className="relative inline-block max-h-full max-w-full">
-            {/* img dengan max-h-screen agar tidak overflow vertikal, object-contain menjaga proporsi */}
             <img 
               src="/assets/denah.jpg" 
               alt="Factory Floor Plan" 
               className="max-h-[70vh] w-auto h-auto object-contain rounded-lg shadow-sm border border-gray-100"
             />
 
-            {/* Markers - Menggunakan koordinat persentase agar tetap presisi */}
             {cameras.map((cam) => (
               <button
                 key={cam.id}
-                onClick={() => setSelectedCam(cam)}
-                className="absolute group transform -translate-x-1/2 -translate-y-1/2 transition-all hover:scale-125 active:scale-95"
+                type="button"
+              disabled={!cam.isOnline}
+                onClick={() => setSelectedCamId(cam.id)}
+                aria-label={`${cam.name} ${cam.isOnline ? 'online' : 'offline'}`}
+                className={`absolute group transform -translate-x-1/2 -translate-y-1/2 transition-all active:scale-95 ${
+                  cam.isOnline ? 'hover:scale-125' : 'cursor-not-allowed opacity-60'
+                }`}
                 style={{ top: cam.top, left: cam.left }}
               >
                 <div className="relative flex items-center justify-center">
-                  <div className="absolute w-16 h-16 bg-yellow-200/40 rounded-full blur-xl animate-pulse" />
-                  <div className="bg-[#B98E3B] p-2 rounded-full border-2 border-white shadow-lg text-white z-10">
+                  {cam.isOnline && (
+                    <div className="absolute w-16 h-16 bg-yellow-200/40 rounded-full blur-xl animate-pulse" />
+                  )}
+                  <div className={`${cam.isOnline ? 'bg-[#B98E3B]' : 'bg-gray-400'} p-2 rounded-full border-2 border-white shadow-lg text-white z-10`}>
                     <Camera size={16} />
                   </div>
-                  {/* Tooltip Nama Ruangan */}
                   <div className="absolute bottom-full mb-2 hidden group-hover:block bg-black text-white text-[10px] px-2 py-1 rounded whitespace-nowrap z-20 shadow-xl">
-                    {cam.name}
+                    <p className="font-bold">{cam.name}</p>
+                    <p className="text-gray-300">
+                      {cam.device?.label || (cam.allowDefaultCamera ? 'Default browser camera' : 'No camera device')}
+                    </p>
                   </div>
                 </div>
               </button>
@@ -89,7 +93,6 @@ export default function LiveCam() {
         </div>
       </div>
 
-      {/* Modal Popup Stream (Sesuai Referensi Gambar) */}
       {selectedCam && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden animate-in zoom-in duration-300">
@@ -97,29 +100,39 @@ export default function LiveCam() {
               <div>
                 <h3 className="text-xl font-bold text-gray-800">Stream Camera</h3>
                 <p className="text-xs text-gray-500 font-bold uppercase">{selectedCam.name}</p>
+                <p className="mt-1 text-[10px] text-gray-400 font-semibold uppercase tracking-wide">
+                  {selectedCam.device?.label || (selectedCam.allowDefaultCamera ? 'Default browser camera' : 'No camera device')}
+                </p>
               </div>
               <div className="flex gap-4">
-                <button className="p-2 hover:bg-gray-100 rounded-full transition-colors text-gray-600">
+                <button
+                  type="button"
+                  onClick={handleRefresh}
+                  className="p-2 hover:bg-gray-100 rounded-full transition-colors text-gray-600"
+                  aria-label="Refresh camera stream"
+                >
                   <RefreshCw size={24} />
                 </button>
-                <button onClick={() => setSelectedCam(null)} className="p-2 hover:bg-red-50 text-gray-600 hover:text-red-500 rounded-full transition-colors">
+                <button
+                  type="button"
+                  onClick={() => setSelectedCamId(null)}
+                  className="p-2 hover:bg-red-50 text-gray-600 hover:text-red-500 rounded-full transition-colors"
+                  aria-label="Close camera stream"
+                >
                   <X size={24} />
                 </button>
               </div>
             </div>
-            <div className="bg-black aspect-video relative">
-              <div className="absolute top-4 left-4 z-10 flex flex-col gap-1">
-                <div className="bg-black/50 text-white text-[10px] px-2 py-1 rounded font-mono">{timestamp}</div>
-                <div className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold uppercase w-fit animate-pulse">Live</div>
-              </div>
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-              />
-            </div>
+            <DetectionCameraFeed
+              key={`${selectedCam.id}-${selectedCam.device?.deviceId || 'offline'}-${streamVersion}`}
+              label={selectedCam.name}
+              cameraId={`LIVE_${selectedCam.id}`}
+              deviceId={selectedCam.device?.deviceId || ''}
+              allowDefaultCamera={selectedCam.allowDefaultCamera}
+              disabled={!selectedCam.isOnline}
+              disabledMessage="Camera slot ini belum memiliki device."
+              onStreamReady={refresh}
+            />
           </div>
         </div>
       )}
