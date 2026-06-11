@@ -1,6 +1,6 @@
 """
-inference.py  [v5.0 — Epson Factory K3 | 11-Class Dual Detection]
-==================================================================
+inference.py  [v5.0 — Epson Factory K3 | Model-Aware Detection]
+================================================================
 Pipeline inference real-time YOLOv11 untuk deteksi APD K3 Epson.
 
 Kelas model best.pt (11 kelas aktual):
@@ -93,6 +93,15 @@ LABEL_FG               = (255, 255, 255)   # teks putih
 
 MODEL_INPUT_SIZE  = 640
 NMS_IOU_THRESHOLD = 0.45
+
+
+def normalize_class_name(class_name: str) -> str:
+    normalized = class_name.strip()
+    aliases = {
+        "person": "Person",
+        "goggle": "goggles",
+    }
+    return aliases.get(normalized.lower(), normalized.lower())
 
 
 # ─────────────────────────────────────────────
@@ -250,9 +259,24 @@ class APDInferencePipeline:
         print(f"[INFO] Loading model  : {model_path}")
         if use_onnx:
             self._load_onnx(model_path)
+            self.model_class_names = dict(CLASS_NAMES)
         else:
             self.model = YOLO(model_path)
             self._verify_classes()
+
+        supported_classes = set(self.model_class_names.values())
+        self.required_ppe = [
+            ppe for ppe in REQUIRED_PPE
+            if ppe in supported_classes
+        ]
+        if "Person" not in supported_classes:
+            raise ValueError(
+                f"Model must contain a person class; got {self.model_class_names}"
+            )
+        if not self.required_ppe:
+            raise ValueError(
+                f"Model does not contain supported PPE classes; got {self.model_class_names}"
+            )
 
         self.violation_logic = ViolationLogic(
             camera_id        = camera_id,
@@ -261,11 +285,12 @@ class APDInferencePipeline:
             log_to_file      = True,
             backend_url      = backend_url,
             service_key      = service_key,
+            required_ppe     = self.required_ppe,
         )
 
         self.frame_count = 0
         self.fps_display = 0.0
-        self.class_count = {name: 0 for name in CLASS_NAMES.values()}
+        self.class_count = {name: 0 for name in self.model_class_names.values()}
 
         print(f"[INFO] Confidence     : {confidence}")
         print(f"[INFO] IoU NMS        : {NMS_IOU_THRESHOLD}")
@@ -275,6 +300,7 @@ class APDInferencePipeline:
         print(f"[INFO] Skip frames    : {skip_frames}")
         print(f"[INFO] Backend        : {backend_url or 'OFF'}")
         print(f"[INFO] Format         : {'ONNX' if use_onnx else 'PyTorch .pt'}")
+        print(f"[INFO] Required PPE   : {', '.join(self.required_ppe)}")
         print(f"[INFO] Output         : {self.output_dir.resolve()}\n")
 
     # ─────────────────────────────────────────
@@ -301,20 +327,12 @@ class APDInferencePipeline:
     # ─────────────────────────────────────────
 
     def _verify_classes(self):
-        model_names = self.model.names
-        expected    = CLASS_NAMES  # {0:'helmet', 1:'gloves', ... 10:'no_boots'}
-        mismatch    = [
-            f"  class {cid}: expected '{nm}', got '{model_names.get(cid, '???')}'"
-            for cid, nm in expected.items()
-            if model_names.get(cid) != nm
-        ]
+        model_names = {
+            int(cid): normalize_class_name(name)
+            for cid, name in self.model.names.items()
+        }
+        self.model_class_names = model_names
         print(f"[INFO] Model classes  : {model_names}")
-        if mismatch:
-            print("[WARN] Class mismatch — cek CLASS_NAMES di violation_logic.py:")
-            for m in mismatch:
-                print(m)
-        else:
-            print("[INFO] Class names    : ✓ semua 11 kelas sesuai")
 
     # ─────────────────────────────────────────
     #  INFERENCE + SCALE + NMS
@@ -348,7 +366,7 @@ class APDInferencePipeline:
                 continue
             for box in result.boxes:
                 cid   = int(box.cls[0].item())
-                cname = CLASS_NAMES.get(cid, f"class_{cid}")
+                cname = self.model_class_names.get(cid, f"class_{cid}")
                 conf  = float(box.conf[0].item())
 
                 raw_bbox         = tuple(float(v) for v in box.xyxy[0].tolist())
@@ -395,7 +413,7 @@ class APDInferencePipeline:
             x2 = float(cx + bw / 2)
             y2 = float(cy + bh / 2)
 
-            cname           = CLASS_NAMES.get(cid, f"class_{cid}")
+            cname           = self.model_class_names.get(cid, f"class_{cid}")
             x1, y1, x2, y2 = scale_coords((x1, y1, x2, y2), orig_w, orig_h)
 
             if x2 <= x1 or y2 <= y1:
@@ -444,7 +462,7 @@ class APDInferencePipeline:
           2. Bbox APD negatif  — merah + label
           3. Bbox Person       — oranye/merah + label APD missing
           4. Panel info kiri atas
-          5. Panel status K3 kanan atas  (5 APD Epson)
+          5. Panel status K3 kanan atas
           6. Banner pelanggaran bawah
         """
         vis = frame.copy()
@@ -480,8 +498,16 @@ class APDInferencePipeline:
         # ── Layer 3: Bbox Person ──────────────────────────────────────────
         for det in person_dets:
             x1, y1, x2, y2 = det.bbox
-            ppe_status   = get_person_ppe_dict(det, detections, frame_height=h)
-            is_violating = any(not ppe_status.get(ppe, False) for ppe in REQUIRED_PPE)
+            ppe_status = get_person_ppe_dict(
+                det,
+                detections,
+                frame_height=h,
+                required_ppe=self.required_ppe,
+            )
+            is_violating = any(
+                not ppe_status.get(ppe, False)
+                for ppe in self.required_ppe
+            )
             partial      = is_partial_person(det.bbox, h)
 
             color = PERSON_VIOLATION_COLOR if is_violating else CLASS_COLORS["Person"]
@@ -490,11 +516,16 @@ class APDInferencePipeline:
 
             # Label APD yang hilang
             missing = []
-            if not ppe_status.get("helmet",  False): missing.append("X Helm")
-            if not ppe_status.get("vest",    False): missing.append("X Rompi")
-            if not ppe_status.get("boots",   False): missing.append("X Boots")
-            if not ppe_status.get("goggles", False): missing.append("X Goggle")
-            if not ppe_status.get("gloves",  False): missing.append("X Gloves")
+            if "helmet" in self.required_ppe and not ppe_status.get("helmet", False):
+                missing.append("X Helm")
+            if "vest" in self.required_ppe and not ppe_status.get("vest", False):
+                missing.append("X Rompi")
+            if "boots" in self.required_ppe and not ppe_status.get("boots", False):
+                missing.append("X Boots")
+            if "goggles" in self.required_ppe and not ppe_status.get("goggles", False):
+                missing.append("X Goggle")
+            if "gloves" in self.required_ppe and not ppe_status.get("gloves", False):
+                missing.append("X Gloves")
 
             label = f"Person {det.confidence:.2f}"
             if partial:
@@ -524,7 +555,7 @@ class APDInferencePipeline:
             cv2.putText(vis, ln, (8, 20 + i * 19),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 220, 220), 1, cv2.LINE_AA)
 
-        # ── Layer 5: Panel status K3 kanan atas (5 APD Epson) ───────────
+        # ── Layer 5: Panel status K3 kanan atas ─────────────────────────
         STATUS_STYLE = {
             "COMPLIANT": ("Patuh   ", COMPLIANT_COLOR),
             "VIOLATION": ("LANGGAR!", VIOLATION_COLOR),
@@ -534,13 +565,13 @@ class APDInferencePipeline:
         px      = w - panel_w - 8
 
         ov2 = vis.copy()
-        panel_h = 26 + len(REQUIRED_PPE) * 26 + 6
+        panel_h = 26 + len(self.required_ppe) * 26 + 6
         cv2.rectangle(ov2, (px - 8, 0), (w, panel_h), (15, 15, 15), -1)
         cv2.addWeighted(ov2, 0.70, vis, 0.30, 0, vis)
 
         cv2.putText(vis, "STATUS APD — EPSON K3", (px, 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 200, 200), 1, cv2.LINE_AA)
-        for i, ppe_cls in enumerate(REQUIRED_PPE):
+        for i, ppe_cls in enumerate(self.required_ppe):
             lbl         = PANEL_LABELS.get(ppe_cls, ppe_cls)
             s           = apd_status.get(ppe_cls, "UNKNOWN")
             text, color = STATUS_STYLE[s]
@@ -719,10 +750,8 @@ class APDInferencePipeline:
     def _print_banner(self):
         print(f"\n{'='*65}")
         print(f"  APD Inference Pipeline v5.0 — YOLOv11 | Epson Factory K3")
-        print(f"  11 Classes: helmet|gloves|vest|boots|goggles|none|Person")
-        print(f"              no_helmet|no_goggle|no_gloves|no_boots")
-        print(f"  Detection: DUAL MODE (negative class + positive absent)")
-        print(f"  Standard : Epson K3 — 5 APD Wajib")
+        print(f"  Detection: model-aware PPE compliance")
+        print(f"  Rules    : enabled for PPE classes present in the model")
         print(f"{'='*65}")
 
     def _print_summary(self):
@@ -744,7 +773,7 @@ class APDInferencePipeline:
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="APD Inference v5.0 — Epson Factory K3 | 11-Class Dual Detection",
+        description="APD Inference v5.0 — Epson Factory K3 | Model-Aware Detection",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Contoh:

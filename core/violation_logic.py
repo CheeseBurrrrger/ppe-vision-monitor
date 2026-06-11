@@ -1,6 +1,6 @@
 """
-violation_logic.py  [v5.0 — Epson Factory K3 | 11-Class Dual Detection]
-=========================================================================
+violation_logic.py  [v5.0 — Epson Factory K3 | Model-Aware Detection]
+========================================================================
 Logika deteksi pelanggaran K3 untuk model YOLOv11 best.pt (11 kelas).
 
 Kelas model best.pt (AKTUAL hasil inspect):
@@ -345,6 +345,7 @@ def get_person_ppe_dict(
     person_det:     Detection,
     all_detections: List[Detection],
     frame_height:   Optional[int] = None,
+    required_ppe:   Optional[List[str]] = None,
 ) -> Dict[str, bool]:
     """
     Status semua APD untuk satu Person.
@@ -357,7 +358,7 @@ def get_person_ppe_dict(
     neg_dets = [d for d in all_detections if d.class_name in PPE_NEGATIVE_CLASSES]
 
     result = {}
-    for ppe in ALL_PPE:
+    for ppe in required_ppe or ALL_PPE:
         # Cek kelas negatif (primer)
         neg_cls = NEGATIVE_TO_POSITIVE.get(ppe)       # dapatkan neg_class dari mapping
         # Balik mapping: PPE positif → neg class
@@ -399,12 +400,14 @@ class ViolationLogic:
         log_to_file:      bool          = True,
         backend_url:      Optional[str] = "https://localhost:8000",
         service_key:      str           = "",
+        required_ppe:     Optional[List[str]] = None,
     ):
         self.camera_id        = camera_id
         self.save_screenshots = save_screenshots
         self.log_to_file      = log_to_file
         self.backend_url      = backend_url
         self.service_key      = service_key
+        self.required_ppe     = list(required_ppe or REQUIRED_PPE)
         self.output_dir       = Path(output_dir)
         self.screenshot_dir   = self.output_dir / "screenshots"
 
@@ -427,7 +430,7 @@ class ViolationLogic:
         logger.info(
             f"ViolationLogic v5.0 Epson K3 | cam={camera_id} | "
             f"backend={'ON → ' + backend_url if backend_url else 'OFF'} | "
-            f"classes=11 | required_ppe={len(REQUIRED_PPE)}"
+            f"required_ppe={','.join(self.required_ppe)}"
         )
 
     def process(
@@ -457,6 +460,8 @@ class ViolationLogic:
             partial = bool(fh and is_partial_person(person.bbox, fh))
 
             for vtype, rule in VIOLATION_RULES.items():
+                if rule["ppe_class"] not in self.required_ppe:
+                    continue
                 # Skip APD yang dikecualikan saat partial
                 if partial and rule["ppe_class"] in PARTIAL_EXEMPT_PPE:
                     continue
@@ -511,14 +516,14 @@ class ViolationLogic:
         person_dets = [d for d in detections if d.class_name == "Person"]
 
         if not person_dets:
-            return {k: "UNKNOWN" for k in REQUIRED_PPE}
+            return {k: "UNKNOWN" for k in self.required_ppe}
 
         valid_persons = [p for p in person_dets if p.confidence >= MIN_PERSON_CONF]
         if not valid_persons:
-            return {k: "UNKNOWN" for k in REQUIRED_PPE}
+            return {k: "UNKNOWN" for k in self.required_ppe}
 
         status: Dict[str, str] = {}
-        for ppe_cls in REQUIRED_PPE:
+        for ppe_cls in self.required_ppe:
             compliant = False
             violation = False
             for p in valid_persons:
@@ -527,7 +532,12 @@ class ViolationLogic:
                         compliant = True
                         continue
 
-                ppe_dict = get_person_ppe_dict(p, detections, frame_height)
+                ppe_dict = get_person_ppe_dict(
+                    p,
+                    detections,
+                    frame_height,
+                    required_ppe=self.required_ppe,
+                )
                 if ppe_dict.get(ppe_cls, False):
                     compliant = True
                 else:

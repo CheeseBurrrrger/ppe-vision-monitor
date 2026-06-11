@@ -15,6 +15,7 @@ build/
 models/
 model/runs/
 *.pt
+!model/best_deva.pt
 *.onnx
 *.engine
 *.trt

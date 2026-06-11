@@ -21,13 +21,17 @@ from violation_logic import ViolationLogic
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 CV_SERVICE_KEY = os.getenv("CV_SERVICE_KEY", "")
 WS_PORT = int(os.getenv("WS_PORT", "8765"))
+DEFAULT_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "model", "best_deva.pt"
+)
+MODEL_PATH = os.path.abspath(os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH))
 
 pipelines = {}
 
 def get_pipeline(camera_id):
     if camera_id not in pipelines:
         pipelines[camera_id] = APDInferencePipeline(
-            model_path=os.path.join(os.path.dirname(__file__), '..', 'model', 'best2.pt'),
+            model_path=MODEL_PATH,
             camera_id=camera_id,
             output_dir=os.path.join(os.path.dirname(__file__), 'inference_output'),
             backend_url=BACKEND_URL,
@@ -83,7 +87,10 @@ async def handle(websocket):
             print(f"[WS] Error: {e}")
 async def main():
     host = os.getenv("WS_HOST", "0.0.0.0")
-    print(f"[WS] Starting server on ws://{host}:{WS_PORT}")
+    if not os.path.isfile(MODEL_PATH):
+        raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+    print(f"[WS] Model: {MODEL_PATH}", flush=True)
+    print(f"[WS] Starting server on ws://{host}:{WS_PORT}", flush=True)
     async with websockets.serve(handle, host, WS_PORT):
         await asyncio.Future()
 
