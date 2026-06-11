@@ -246,6 +246,8 @@ class APDInferencePipeline:
         backend_url:  Optional[str] = "https://localhost:8000",
         use_onnx:     bool          = False,
         service_key:  str           = "",
+        input_size:   int           = MODEL_INPUT_SIZE,
+        shared_model = None,
     ):
         self._print_banner()
         self.use_onnx    = use_onnx
@@ -255,11 +257,18 @@ class APDInferencePipeline:
         self.skip_frames = skip_frames
         self.camera_id   = camera_id
         self.output_dir  = Path(output_dir)
+        self.input_size  = int(input_size)
+        if self.input_size <= 0 or self.input_size % 32 != 0:
+            raise ValueError("input_size must be a positive multiple of 32")
 
         print(f"[INFO] Loading model  : {model_path}")
         if use_onnx:
             self._load_onnx(model_path)
             self.model_class_names = dict(CLASS_NAMES)
+        elif shared_model is not None:
+            self.model = shared_model
+            self._verify_classes()
+            print("[INFO] Model instance  : shared")
         else:
             self.model = YOLO(model_path)
             self._verify_classes()
@@ -294,7 +303,7 @@ class APDInferencePipeline:
 
         print(f"[INFO] Confidence     : {confidence}")
         print(f"[INFO] IoU NMS        : {NMS_IOU_THRESHOLD}")
-        print(f"[INFO] Input size     : {MODEL_INPUT_SIZE}px")
+        print(f"[INFO] Input size     : {self.input_size}px")
         print(f"[INFO] Partial ratio  : {PARTIAL_PERSON_RATIO}")
         print(f"[INFO] Device         : {device}")
         print(f"[INFO] Skip frames    : {skip_frames}")
@@ -348,8 +357,8 @@ class APDInferencePipeline:
 
     def _run_yolo(self, frame: np.ndarray, orig_w: int, orig_h: int) -> List[Detection]:
         """Inference via Ultralytics YOLO (.pt)."""
-        if orig_w != MODEL_INPUT_SIZE or orig_h != MODEL_INPUT_SIZE:
-            frame_inp = cv2.resize(frame, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
+        if orig_w != self.input_size or orig_h != self.input_size:
+            frame_inp = cv2.resize(frame, (self.input_size, self.input_size))
         else:
             frame_inp = frame
 
@@ -358,6 +367,7 @@ class APDInferencePipeline:
             conf    = self.conf,
             iou     = self.iou_thresh,
             device  = self.device,
+            imgsz   = self.input_size,
             verbose = False,
         )
         detections = []
@@ -370,7 +380,12 @@ class APDInferencePipeline:
                 conf  = float(box.conf[0].item())
 
                 raw_bbox         = tuple(float(v) for v in box.xyxy[0].tolist())
-                x1, y1, x2, y2  = scale_coords(raw_bbox, orig_w, orig_h)
+                x1, y1, x2, y2 = scale_coords(
+                    raw_bbox,
+                    orig_w,
+                    orig_h,
+                    model_size=self.input_size,
+                )
 
                 if x2 <= x1 or y2 <= y1:
                     continue
@@ -386,7 +401,7 @@ class APDInferencePipeline:
 
     def _run_onnx(self, frame: np.ndarray, orig_w: int, orig_h: int) -> List[Detection]:
         """Inference via ONNX Runtime (.onnx) — lebih cepat di CPU."""
-        img = cv2.resize(frame, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
+        img = cv2.resize(frame, (self.input_size, self.input_size))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))[np.newaxis, :]  # NCHW
 
@@ -414,7 +429,12 @@ class APDInferencePipeline:
             y2 = float(cy + bh / 2)
 
             cname           = self.model_class_names.get(cid, f"class_{cid}")
-            x1, y1, x2, y2 = scale_coords((x1, y1, x2, y2), orig_w, orig_h)
+            x1, y1, x2, y2 = scale_coords(
+                (x1, y1, x2, y2),
+                orig_w,
+                orig_h,
+                model_size=self.input_size,
+            )
 
             if x2 <= x1 or y2 <= y1:
                 continue

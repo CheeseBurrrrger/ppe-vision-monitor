@@ -46,6 +46,7 @@ export default function DetectionCameraFeed({
   const wsRef = useRef(null);
   const frameIntervalRef = useRef(null);
   const violationTimeoutRef = useRef(null);
+  const requestInFlightRef = useRef(false);
 
   const [timestamp, setTimestamp] = useState(formatTimestamp);
   const [streamReady, setStreamReady] = useState(false);
@@ -209,11 +210,19 @@ export default function DetectionCameraFeed({
     ws.onopen = () => {
       setWsReady(true);
       setDetectionError("");
+      requestInFlightRef.current = false;
       frameIntervalRef.current = setInterval(() => {
         const video = videoRef.current;
         const canvas = captureCanvasRef.current;
 
-        if (!video || !canvas || video.readyState < 2 || ws.readyState !== WebSocket.OPEN) {
+        if (
+          !video ||
+          !canvas ||
+          video.readyState < 2 ||
+          ws.readyState !== WebSocket.OPEN ||
+          requestInFlightRef.current ||
+          ws.bufferedAmount > 0
+        ) {
           return;
         }
 
@@ -226,11 +235,18 @@ export default function DetectionCameraFeed({
         ctx.drawImage(video, 0, 0, CAPTURE_WIDTH, CAPTURE_HEIGHT);
         const frame = canvas.toDataURL("image/jpeg", 0.6).split(",")[1];
 
-        ws.send(JSON.stringify({ camera_id: resolvedCameraId, frame }));
+        try {
+          requestInFlightRef.current = true;
+          ws.send(JSON.stringify({ camera_id: resolvedCameraId, frame }));
+        } catch (err) {
+          requestInFlightRef.current = false;
+          console.error("[WS] Send error:", err);
+        }
       }, FRAME_INTERVAL_MS);
     };
 
     ws.onmessage = (event) => {
+      requestInFlightRef.current = false;
       try {
         const data = JSON.parse(event.data);
         drawBoxes(data.detections || []);
@@ -247,11 +263,13 @@ export default function DetectionCameraFeed({
 
     ws.onerror = (err) => {
       console.error("[WS] Error:", err);
+      requestInFlightRef.current = false;
       setWsReady(false);
       setDetectionError("AI detection tidak tersambung.");
     };
 
     ws.onclose = () => {
+      requestInFlightRef.current = false;
       setWsReady(false);
       clearInterval(frameIntervalRef.current);
     };
@@ -259,6 +277,7 @@ export default function DetectionCameraFeed({
     return () => {
       clearInterval(frameIntervalRef.current);
       clearTimeout(violationTimeoutRef.current);
+      requestInFlightRef.current = false;
       setWsReady(false);
       ws.close();
     };
