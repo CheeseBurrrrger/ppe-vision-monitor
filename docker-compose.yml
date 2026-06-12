@@ -54,7 +54,7 @@ services:
       BACKEND_URL: http://backend:8000
       CV_SERVICE_KEY: ${CV_SERVICE_KEY}
       WS_PORT: 8765
-      MODEL_PATH: ${MODEL_PATH:-/app/model/best_deva.pt}
+      MODEL_PATH: ${MODEL_PATH:-/app/model/best2.pt}
       MODEL_INPUT_SIZE: ${MODEL_INPUT_SIZE:-416}
       TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-2}
       OMP_NUM_THREADS: ${TORCH_NUM_THREADS:-2}

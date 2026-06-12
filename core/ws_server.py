@@ -32,7 +32,7 @@ CV_SERVICE_KEY = os.getenv("CV_SERVICE_KEY", "")
 WS_PORT = int(os.getenv("WS_PORT", "8765"))
 MODEL_INPUT_SIZE = int(os.getenv("MODEL_INPUT_SIZE", "416"))
 DEFAULT_MODEL_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "model", "best_deva.pt"
+    os.path.dirname(__file__), "..", "model", "best2.pt"
 )
 MODEL_PATH = os.path.abspath(os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH))
 
