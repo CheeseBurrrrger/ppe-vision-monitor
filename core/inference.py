@@ -1,225 +1,514 @@
 """
-inference.py  [v5.0 — Epson Factory K3 | 11-Class Dual Detection]
-==================================================================
+inference.py  [v6.1 — Epson Factory K3 | Smart Violation BBox]
+================================================================
 Pipeline inference real-time YOLOv11 untuk deteksi APD K3 Epson.
 
-Kelas model best.pt (11 kelas aktual):
-    0: helmet        → HIJAU TERANG  (APD hadir)
-    1: gloves        → UNGU          (APD hadir)
-    2: vest          → BIRU MUDA     (APD hadir)
-    3: boots         → KUNING        (APD hadir)
-    4: goggles       → CYAN          (APD hadir)
-    5: none          → ABU-ABU       (tidak ada APD)
-    6: Person        → ORANYE (patuh) / MERAH CERAH (langgar)
-    7: no_helmet     → MERAH CERAH   (langsung trigger violation)
-    8: no_goggle     → MERAH CERAH   (langsung trigger violation)
-    9: no_gloves     → MERAH CERAH   (langsung trigger violation)
-   10: no_boots      → MERAH CERAH   (langsung trigger violation)
+PERUBAHAN UTAMA v6.1 vs v5.0:
+  BBOX HANYA MUNCUL SAAT PELANGGARAN
+    - Orang patuh sempurna → tidak ada bbox apapun di frame (clean)
+    - Orang melanggar → bbox HANYA di zona body-part yang bermasalah
 
-Strategi Deteksi v5.0 — DUAL MODE:
-  Mode A (PRIMER)  : Kelas negatif (no_helmet, dll) langsung = VIOLATION
-  Mode B (SEKUNDER): Kelas positif tidak ditemukan di sekitar Person = VIOLATION
+  SEMUA 5 APD WAJIB (tidak ada pengecualian):
+    - Helm hilang    → bbox di zona kepala   (0–35% tinggi person)
+    - Goggle hilang  → bbox di zona mata     (5–38%)
+    - Vest hilang    → bbox di zona dada     (28–72%)
+    - Gloves hilang  → bbox di zona tangan   (52–95%)
+    - Boots hilang   → bbox di zona kaki     (72–100%)
 
-Standard K3 Epson: Helm + Rompi + Sepatu + Goggle + Sarung Tangan
+  REFERENSI ILMIAH:
+    "Automated PPE compliance monitoring using deep learning-based
+     detection and pose estimation" — ScienceDirect 2025.
+    Kepala (telinga/mata) → helmet, pergelangan tangan → gloves,
+    pergelangan kaki → boots, bahu+pinggul → vest.
+
+  PRIORITAS BBOX (tertinggi ke terendah akurasi):
+    1. Bbox kelas negatif langsung dari model (no_helmet, no_goggle, dst.)
+       → akurasi model itu sendiri, paling akurat
+    2. Kalkulasi body-part zone dari bbox Person
+       → fallback robust saat kelas negatif tidak ada
+
+  FITUR LAIN:
+    - Dual-mode detection: negatif class (primer) + absen positif (sekunder)
+    - Temporal smoothing 10 frame: menghilangkan flicker
+    - Conflict resolution: helmet↔no_helmet, goggles↔no_goggle, dst.
+    - ONNX auto-detect Format A (4+C) dan Format B (5+C/YOLOv5)
+    - Class-wise NMS untuk performa CPU
+
+Kelas model (11 kelas):
+    0:helmet 1:gloves 2:vest 3:boots 4:goggles
+    5:none   6:Person 7:no_helmet 8:no_goggle 9:no_gloves 10:no_boots
 
 Cara pakai:
   python inference.py --source 0 --model best.pt --no-backend
-  python inference.py --source video.mp4 --model best.pt --skip 2 --no-backend
-  python inference.py --source rtsp://ip:port/stream --model best.pt
-  python inference.py --source 0 --model best.pt --save-video out.mp4 --no-backend
-  python inference.py --source 0 --model best.onnx --use-onnx --no-backend
+  python inference.py --source video.mp4 --model best.onnx --use-onnx
+  python inference.py --source 0 --model best.pt --save-video out.mp4
+  python inference.py --source images/ --model best.pt --no-backend
 """
 
 import cv2
 import time
 import argparse
 import numpy as np
+from collections import deque
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
-# ── Import violation_logic v5.0 ───────────────────────────────────
+# ── Import violation_logic v6.0 ───────────────────────────────────
 from violation_logic import (
     ViolationLogic,
     Detection,
     ViolationEvent,
     CLASS_NAMES,
     REQUIRED_PPE,
-    ALL_PPE,
-    Y_ZONES,
-    MIN_OVERLAP,
-    MIN_PERSON_CONF,
-    MIN_PPE_CONF,
-    PARTIAL_PERSON_RATIO,
-    PANEL_LABELS,
-    VIOLATION_COLOR,
-    COMPLIANT_COLOR,
-    UNKNOWN_COLOR,
-    WARNING_COLOR,
     PPE_POSITIVE_CLASSES,
     PPE_NEGATIVE_CLASSES,
     PPE_DISPLAY_NAMES,
-    get_person_ppe_dict,
-    is_partial_person,
+    NEGATIVE_TO_POSITIVE,
+    POSITIVE_TO_NEGATIVE,
+    NEG_HEAD_Y_ZONES,
+    NEG_HEAD_X_ZONES,
+    HEAD_Y_ZONES,
+    HEAD_X_ZONES,
+    PPE_CONFIG,
+    MIN_PERSON_CONF,
+    MIN_PPE_CONF,
+    MIN_NEG_CONF,
+    TEMPORAL_WINDOW,
+    VIOLATION_COLOR,
+    COMPLIANT_COLOR,
+    UNKNOWN_COLOR,
+    bbox_center_inside_zone,
     overlap_ratio,
-    bbox_center,
 )
 
 try:
     from ultralytics import YOLO
+    HAS_ULTRALYTICS = True
 except ImportError:
-    raise ImportError("Install dulu: pip install ultralytics")
+    HAS_ULTRALYTICS = False
+
+try:
+    import onnxruntime as ort
+    HAS_ONNX = True
+except ImportError:
+    HAS_ONNX = False
 
 
 # ─────────────────────────────────────────────
-#  WARNA PER KELAS (BGR)
+#  KONSTANTA
 # ─────────────────────────────────────────────
 
-CLASS_COLORS = {
-    # Kelas positif (APD hadir)
-    "helmet":   (  0, 210,   0),   # hijau terang
-    "gloves":   (210,   0, 210),   # ungu
-    "vest":     (255, 185,   0),   # biru muda
-    "boots":    (  0, 210, 210),   # kuning
-    "goggles":  (210, 210,   0),   # cyan
-    "none":     (130, 130, 130),   # abu-abu
-    # Kelas orang
-    "Person":   (  0, 165, 255),   # oranye (patuh)
-    # Kelas negatif → selalu merah cerah
-    "no_helmet": (0,  0, 255),
-    "no_goggle": (0,  0, 255),
-    "no_gloves": (0,  0, 255),
-    "no_boots":  (0,  0, 255),
+MODEL_INPUT_SIZE    = 640
+NMS_IOU_THRESHOLD   = 0.45
+CONFLICT_IOU_THRESH = 0.50   # IoU ≥ ini → konflik pos vs neg
+
+# Warna violation bbox per APD (BGR)
+VIOL_COLORS: Dict[str, Tuple[int, int, int]] = {
+    "helmet":  (  0,   0, 255),   # merah
+    "goggles": (  0,  80, 255),   # merah-oranye
+    "vest":    (  0, 160, 255),   # oranye
+    "gloves":  (  0, 200, 255),   # kuning-oranye
+    "boots":   ( 80,   0, 255),   # merah-ungu
 }
 
-PERSON_VIOLATION_COLOR = VIOLATION_COLOR   # (0, 0, 255) merah cerah
-LABEL_FG               = (255, 255, 255)   # teks putih
+# Label pendek untuk bbox violation
+PPE_SHORT: Dict[str, str] = {
+    "helmet":  "NO HELM",
+    "goggles": "NO GOGGLE",
+    "vest":    "NO ROMPI",
+    "gloves":  "NO GLOVES",
+    "boots":   "NO BOOTS",
+}
 
-MODEL_INPUT_SIZE  = 640
-NMS_IOU_THRESHOLD = 0.45
+# Label panel kanan atas
+PANEL_LABELS: Dict[str, str] = {
+    "helmet":  "Helm     ",
+    "vest":    "Rompi    ",
+    "boots":   "Sepatu   ",
+    "goggles": "Goggle   ",
+    "gloves":  "Gloves   ",
+}
 
 
 # ─────────────────────────────────────────────
-#  SCALE COORDINATES
+#  BODY-PART ANCHOR ZONES
+#
+#  Referensi: "Automated PPE compliance monitoring in industrial
+#  environments using deep learning-based detection and pose estimation"
+#  (ScienceDirect, Automation in Construction, 2025)
+#
+#  Zona Y (vertikal) dan X (horizontal) RELATIF terhadap bbox Person
+#  0.0 = tepi atas, 1.0 = tepi bawah (Y)
+#  0.0 = tepi kiri, 1.0 = tepi kanan (X)
+#
+#  Dasar anatomi standar manusia berdiri tegak:
+#    kepala   ≈ 0–15% tinggi tubuh
+#    mata     ≈ 5–12%
+#    bahu     ≈ 18–25%
+#    pinggul  ≈ 45–55%
+#    lutut    ≈ 65–75%
+#    kaki     ≈ 80–100%
 # ─────────────────────────────────────────────
+
+BODY_ZONE_Y: Dict[str, Tuple[float, float]] = {
+    "helmet":  (0.00, 0.35),   # kepala atas
+    "goggles": (0.05, 0.38),   # mata/kacamata
+    "vest":    (0.18, 0.75),   # torso: bahu sampai pinggang (sinkron dengan HEAD_Y_ZONES vest)
+    "gloves":  (0.52, 0.95),   # lengan dan tangan
+    "boots":   (0.72, 1.00),   # tungkai kaki hingga bawah
+}
+BODY_ZONE_X: Dict[str, Tuple[float, float]] = {
+    "helmet":  (0.10, 0.90),
+    "goggles": (0.10, 0.90),
+    "vest":    (0.05, 0.95),
+    "gloves":  (0.00, 1.00),   # selebar mungkin, tangan bisa ke samping
+    "boots":   (0.05, 0.95),
+}
+
+# Padding piksel untuk memperluas violation bbox agar lebih mudah dilihat
+ZONE_PADDING: Dict[str, int] = {
+    "helmet":  5,
+    "goggles": 5,
+    "vest":    8,
+    "gloves":  10,
+    "boots":   8,
+}
+
+
+# ─────────────────────────────────────────────
+#  TEMPORAL VISUAL MEMORY
+# ─────────────────────────────────────────────
+
+class PPEVisualTracker:
+    """
+    Menyimpan status visual APD dalam N frame terakhir.
+    Digunakan khusus untuk overlay rendering (mencegah flicker bbox).
+    Terpisah dari PPEMemory di violation_logic yang dipakai untuk event.
+    """
+    def __init__(self, window: int = TEMPORAL_WINDOW):
+        self._window  = window
+        self._history: Dict[str, Deque[bool]] = {
+            ppe: deque(maxlen=window) for ppe in REQUIRED_PPE
+        }
+
+    def update(self, ppe_status: Dict[str, bool]) -> None:
+        for ppe, present in ppe_status.items():
+            if ppe in self._history:
+                self._history[ppe].append(present)
+
+    def is_present(self, ppe_cls: str) -> bool:
+        hist = self._history.get(ppe_cls)
+        return any(hist) if hist else False
+
+    def reset(self) -> None:
+        for q in self._history.values():
+            q.clear()
+
+
+# ─────────────────────────────────────────────
+#  HELPER GEOMETRI
+# ─────────────────────────────────────────────
+
+def _iou(a: tuple, b: tuple) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0, min(ay2, by2) - max(ay1, by1))
+    inter   = inter_w * inter_h
+    if inter == 0:
+        return 0.0
+    union = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter
+    return inter / union if union > 0 else 0.0
+
 
 def scale_coords(
-    bbox:       Tuple,
+    bbox:       tuple,
     orig_w:     int,
     orig_h:     int,
     model_size: int = MODEL_INPUT_SIZE,
 ) -> Tuple[int, int, int, int]:
-    """
-    Konversi koordinat dari ruang model (640×640) ke resolusi frame asli.
-    WAJIB dipanggil sebelum membuat objek Detection agar posisi bbox akurat.
-    """
-    scale_x = orig_w / model_size
-    scale_y = orig_h / model_size
-
+    sx = orig_w / model_size
+    sy = orig_h / model_size
     x1, y1, x2, y2 = bbox
-    x1 = int(x1 * scale_x);  y1 = int(y1 * scale_y)
-    x2 = int(x2 * scale_x);  y2 = int(y2 * scale_y)
-
-    x1 = max(0, min(x1, orig_w - 1))
-    y1 = max(0, min(y1, orig_h - 1))
-    x2 = max(0, min(x2, orig_w - 1))
-    y2 = max(0, min(y2, orig_h - 1))
-
+    x1 = max(0, min(int(x1*sx), orig_w-1))
+    y1 = max(0, min(int(y1*sy), orig_h-1))
+    x2 = max(0, min(int(x2*sx), orig_w-1))
+    y2 = max(0, min(int(y2*sy), orig_h-1))
     return (x1, y1, x2, y2)
 
 
 # ─────────────────────────────────────────────
-#  NMS PER KELAS
+#  CLASS-WISE NMS
 # ─────────────────────────────────────────────
-
-def _iou(boxA: tuple, boxB: tuple) -> float:
-    ax1, ay1, ax2, ay2 = boxA
-    bx1, by1, bx2, by2 = boxB
-    ix1 = max(ax1, bx1);  iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2);  iy2 = min(ay2, by2)
-    inter = float(max(0, ix2 - ix1) * max(0, iy2 - iy1))
-    if inter == 0:
-        return 0.0
-    areaA = float((ax2 - ax1) * (ay2 - ay1))
-    areaB = float((bx2 - bx1) * (by2 - by1))
-    union = areaA + areaB - inter
-    return inter / union if union > 0 else 0.0
-
 
 def _apply_class_nms(
     detections:    List[Detection],
     iou_threshold: float = NMS_IOU_THRESHOLD,
 ) -> List[Detection]:
-    """NMS per kelas → hilangkan bbox duplikat."""
     result  = []
     classes = list({d.class_name for d in detections})
-
     for cls in classes:
         cls_dets = [d for d in detections if d.class_name == cls]
         if len(cls_dets) <= 1:
             result.extend(cls_dets)
             continue
-        try:
-            import torch
-            from torchvision.ops import nms as tv_nms
-            boxes  = torch.tensor([list(d.bbox) for d in cls_dets], dtype=torch.float32)
-            scores = torch.tensor([d.confidence for d in cls_dets], dtype=torch.float32)
-            keep   = tv_nms(boxes, scores, iou_threshold).tolist()
-            result.extend([cls_dets[i] for i in keep])
-        except ImportError:
-            sorted_dets = sorted(cls_dets, key=lambda d: d.confidence, reverse=True)
-            keep = []
-            while sorted_dets:
-                best = sorted_dets.pop(0)
-                keep.append(best)
-                sorted_dets = [d for d in sorted_dets
-                               if _iou(best.bbox, d.bbox) < iou_threshold]
-            result.extend(keep)
+        sorted_dets = sorted(cls_dets, key=lambda d: d.confidence, reverse=True)
+        keep = []
+        while sorted_dets:
+            best = sorted_dets.pop(0)
+            keep.append(best)
+            sorted_dets = [d for d in sorted_dets
+                           if _iou(best.bbox, d.bbox) < iou_threshold]
+        result.extend(keep)
+    return result
+
+
+# ─────────────────────────────────────────────
+#  CONFLICT RESOLUTION
+#  Satu bbox helmet + satu no_helmet bertumpuk →
+#  buang yang confidence-nya lebih rendah
+# ─────────────────────────────────────────────
+
+_CONFLICT_PAIRS: List[Tuple[str, str]] = [
+    ("helmet",  "no_helmet"),
+    ("goggles", "no_goggle"),
+    ("gloves",  "no_gloves"),
+    ("boots",   "no_boots"),
+]
+
+def resolve_conflicts(detections: List[Detection]) -> List[Detection]:
+    to_remove: Set[int] = set()
+    for pos_cls, neg_cls in _CONFLICT_PAIRS:
+        pos_list = [(i, d) for i, d in enumerate(detections) if d.class_name == pos_cls]
+        neg_list = [(j, d) for j, d in enumerate(detections) if d.class_name == neg_cls]
+        for (i, pd) in pos_list:
+            for (j, nd) in neg_list:
+                if _iou(pd.bbox, nd.bbox) >= CONFLICT_IOU_THRESH:
+                    if pd.confidence >= nd.confidence:
+                        to_remove.add(j)
+                    else:
+                        to_remove.add(i)
+    return [d for i, d in enumerate(detections) if i not in to_remove]
+
+
+# ─────────────────────────────────────────────
+#  VALIDASI APD: POSITIF & NEGATIF
+# ─────────────────────────────────────────────
+
+def _check_positive(
+    person_bbox: tuple,
+    ppe_dets:    List[Detection],
+    ppe_cls:     str,
+) -> bool:
+    """Apakah APD positif ada di sekitar person (overlap + zone)."""
+    cfg      = PPE_CONFIG.get(ppe_cls, {"min_overlap": 0.05, "use_zone": False})
+    min_ov   = cfg["min_overlap"]
+    use_zone = cfg["use_zone"]
+    for det in ppe_dets:
+        if det.class_name != ppe_cls or det.confidence < MIN_PPE_CONF:
+            continue
+        if overlap_ratio(det.bbox, person_bbox) >= min_ov:
+            return True
+        if use_zone and bbox_center_inside_zone(
+            person_bbox, det.bbox,
+            HEAD_Y_ZONES[ppe_cls], HEAD_X_ZONES[ppe_cls],
+        ):
+            return True
+    return False
+
+
+def _check_negative(
+    person_bbox: tuple,
+    neg_dets:    List[Detection],
+    neg_cls:     Optional[str],
+) -> bool:
+    """Apakah kelas negatif APD terdeteksi di sekitar person."""
+    if neg_cls is None:
+        return False
+    pos_cls  = NEGATIVE_TO_POSITIVE.get(neg_cls)
+    min_ov   = PPE_CONFIG.get(pos_cls, {"min_overlap": 0.08})["min_overlap"] if pos_cls else 0.08
+    use_zone = neg_cls in ("no_helmet", "no_goggle")
+    for det in neg_dets:
+        if det.class_name != neg_cls or det.confidence < MIN_NEG_CONF:
+            continue
+        if overlap_ratio(det.bbox, person_bbox) >= min_ov:
+            return True
+        if use_zone and bbox_center_inside_zone(
+            person_bbox, det.bbox,
+            NEG_HEAD_Y_ZONES.get(neg_cls, (0.0, 0.45)),
+            NEG_HEAD_X_ZONES.get(neg_cls, (0.15, 0.85)),
+        ):
+            return True
+    return False
+
+
+# ─────────────────────────────────────────────
+#  STATUS APD PER PERSON — DENGAN TEMPORAL SMOOTHING
+# ─────────────────────────────────────────────
+
+def get_person_ppe_status(
+    person_det:   Detection,
+    all_dets:     List[Detection],
+    frame_height: int,
+    tracker:      PPEVisualTracker,
+) -> Dict[str, bool]:
+    """
+    Dual-mode detection:
+      Mode A (primer) : kelas negatif terdeteksi -> langgar
+      Mode B (sekunder): kelas positif tidak ada -> langgar
+    Semua 5 APD wajib -- tidak ada pengecualian.
+    Temporal smoothing: jika raw=langgar tapi memory ada -> tetap patuh.
+
+    Return: {ppe_cls: True=patuh / False=langgar}
+    """
+    ppe_dets = [d for d in all_dets if d.class_name in PPE_POSITIVE_CLASSES]
+    neg_dets = [d for d in all_dets if d.class_name in PPE_NEGATIVE_CLASSES]
+
+    raw: Dict[str, bool] = {}
+    for ppe_cls in REQUIRED_PPE:
+        neg_cls  = POSITIVE_TO_NEGATIVE.get(ppe_cls)
+        has_neg  = _check_negative(person_det.bbox, neg_dets, neg_cls) if neg_cls else False
+        has_pos  = _check_positive(person_det.bbox, ppe_dets, ppe_cls)
+        raw[ppe_cls] = not (has_neg or (not has_pos))
+
+    # Update tracker dengan status raw
+    tracker.update(raw)
+
+    # Gabung raw + temporal: APD yang sesaat hilang masih dianggap ada
+    final: Dict[str, bool] = {}
+    for ppe_cls in REQUIRED_PPE:
+        if raw[ppe_cls]:
+            final[ppe_cls] = True
+        elif tracker.is_present(ppe_cls):
+            final[ppe_cls] = True   # temporal save
+        else:
+            final[ppe_cls] = False
+    return final
+
+
+# ─────────────────────────────────────────────
+#  HITUNG VIOLATION BBOX PER BODY-PART
+#
+#  INTI FITUR v6.1 — bbox violation ditempatkan di zona tubuh
+#  yang sebenarnya kurang APD, bukan seluruh person bbox.
+#
+#  Prioritas sumber bbox (akurasi tertinggi → terendah):
+#    1. Bbox kelas negatif dari model (no_helmet, no_goggle, dst.)
+#       → Langsung dari deteksi model, akurasi ~mAP model itu sendiri
+#    2. Body-part zone kalkulasi dari person bbox
+#       → Fallback deterministik berdasarkan anatomi
+# ─────────────────────────────────────────────
+
+def compute_violation_bboxes(
+    person_det:  Detection,
+    all_dets:    List[Detection],
+    missing_ppe: List[str],
+    frame_w:     int,
+    frame_h:     int,
+) -> Dict[str, Tuple[int, int, int, int]]:
+    """
+    Hitung bbox pelanggaran untuk setiap APD yang hilang.
+    Return: {ppe_cls: (x1, y1, x2, y2)} koordinat frame asli.
+    """
+    px1, py1, px2, py2 = person_det.bbox
+    pw  = max(px2 - px1, 1)
+    ph  = max(py2 - py1, 1)
+    result: Dict[str, Tuple[int, int, int, int]] = {}
+    neg_dets = [d for d in all_dets if d.class_name in PPE_NEGATIVE_CLASSES]
+
+    for ppe_cls in missing_ppe:
+        pad     = ZONE_PADDING.get(ppe_cls, 6)
+        neg_cls = POSITIVE_TO_NEGATIVE.get(ppe_cls)
+
+        # ── Prioritas 1: bbox kelas negatif dari model ──────────────────
+        best_neg = None
+        best_ov  = -1.0
+        if neg_cls:
+            for nd in neg_dets:
+                if nd.class_name != neg_cls or nd.confidence < MIN_NEG_CONF:
+                    continue
+                ov = overlap_ratio(nd.bbox, person_det.bbox)
+                pos_cls = NEGATIVE_TO_POSITIVE.get(neg_cls, "helmet")
+                min_ov  = PPE_CONFIG.get(pos_cls, {"min_overlap": 0.05})["min_overlap"]
+                if ov > best_ov and ov >= min_ov:
+                    best_ov  = ov
+                    best_neg = nd
+
+        if best_neg is not None:
+            nx1, ny1, nx2, ny2 = best_neg.bbox
+            result[ppe_cls] = (
+                max(0,       nx1 - pad),
+                max(0,       ny1 - pad),
+                min(frame_w, nx2 + pad),
+                min(frame_h, ny2 + pad),
+            )
+            continue
+
+        # ── Prioritas 2: kalkulasi body-part zone ───────────────────────
+        zy0, zy1 = BODY_ZONE_Y.get(ppe_cls, (0.0, 1.0))
+        zx0, zx1 = BODY_ZONE_X.get(ppe_cls, (0.0, 1.0))
+
+        bx1 = max(0,       int(px1 + zx0 * pw) - pad)
+        by1 = max(0,       int(py1 + zy0 * ph) - pad)
+        bx2 = min(frame_w, int(px1 + zx1 * pw) + pad)
+        by2 = min(frame_h, int(py1 + zy1 * ph) + pad)
+
+        if bx2 > bx1 and by2 > by1:
+            result[ppe_cls] = (bx1, by1, bx2, by2)
 
     return result
 
 
 # ─────────────────────────────────────────────
-#  STATUS VISUAL APD BBOX
+#  ONNX DECODER — FORMAT A & B AUTO-DETECT
 # ─────────────────────────────────────────────
 
-def _get_ppe_visual_status(
-    ppe_det:      Detection,
-    person_dets:  List[Detection],
-    frame_height: int,
-) -> str:
+def _decode_onnx_output(
+    raw:         np.ndarray,
+    num_classes: int,
+    conf_thresh: float,
+    orig_w:      int,
+    orig_h:      int,
+    model_size:  int = MODEL_INPUT_SIZE,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Return "valid" jika APD berada di dalam bbox person,
-    "orphan" jika tidak ada person yang cocok.
+    Decode raw ONNX output ke boxes/scores/labels.
+    Auto-detect Format A (4+C kolom) dan Format B (5+C, YOLOv5-style).
     """
-    if not person_dets:
-        return "orphan"
+    out = raw[0] if raw.ndim == 3 else raw
+    if out.shape[0] < out.shape[1]:
+        out = out.T   # (C,N) → (N,C)
 
-    # Kelas negatif selalu tampil sebagai "valid" jika ada person di dekatnya
-    is_negative = ppe_det.class_name in PPE_NEGATIVE_CLASSES
+    n_cols = out.shape[1]
+    if n_cols == 4 + num_classes:
+        cls_start = 4;  obj_col = None
+    elif n_cols == 5 + num_classes:
+        cls_start = 5;  obj_col = 4
+    else:
+        cls_start = 4;  obj_col = None   # fallback
 
-    cx, cy   = bbox_center(ppe_det.bbox)
-    y_zone   = Y_ZONES.get(ppe_det.class_name, (0.0, 1.0))
+    cls_scores = out[:, cls_start:cls_start+num_classes]
+    if obj_col is not None:
+        cls_scores = cls_scores * out[:, obj_col:obj_col+1]
 
-    for person in person_dets:
-        px1, py1, px2, py2 = person.bbox
-        person_h = py2 - py1
-        if person_h <= 0:
-            continue
+    scores = cls_scores.max(axis=1)
+    labels = cls_scores.argmax(axis=1).astype(np.int32)
+    mask   = scores >= conf_thresh
+    out    = out[mask];  scores = scores[mask];  labels = labels[mask]
 
-        inside_x  = px1 <= cx <= px2
-        inside_y  = py1 <= cy <= py2
-        y_min_abs = py1 + y_zone[0] * person_h
-        y_max_abs = py1 + y_zone[1] * person_h
+    if len(scores) == 0:
+        return (np.zeros((0,4),dtype=np.float32),
+                np.zeros(0,dtype=np.float32),
+                np.zeros(0,dtype=np.int32))
 
-        if inside_x and inside_y:
-            if is_negative or (y_min_abs <= cy <= y_max_abs):
-                return "valid"
-
-        if (overlap_ratio(ppe_det.bbox, person.bbox) >= MIN_OVERLAP):
-            if is_negative or (y_min_abs <= cy <= y_max_abs):
-                return "valid"
-
-    return "orphan"
+    cx = out[:,0];  cy = out[:,1];  bw = out[:,2];  bh = out[:,3]
+    sx = orig_w / model_size;  sy = orig_h / model_size
+    x1 = np.clip((cx - bw*0.5)*sx, 0, orig_w)
+    y1 = np.clip((cy - bh*0.5)*sy, 0, orig_h)
+    x2 = np.clip((cx + bw*0.5)*sx, 0, orig_w)
+    y2 = np.clip((cy + bh*0.5)*sy, 0, orig_h)
+    boxes = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
+    return boxes, scores.astype(np.float32), labels
 
 
 # ─────────────────────────────────────────────
@@ -230,29 +519,33 @@ class APDInferencePipeline:
 
     def __init__(
         self,
-        model_path:   str           = "best.pt",
-        confidence:   float         = 0.30,
-        iou:          float         = 0.45,
-        camera_id:    str           = "EPSON_CAM_01",
-        output_dir:   str           = "inference_output",
-        device:       str           = "cpu",
-        skip_frames:  int           = 1,
-        backend_url:  Optional[str] = None,
-        use_onnx:     bool          = False,
+        model_path:      str           = "best.pt",
+        confidence:      float         = 0.30,
+        iou:             float         = 0.45,
+        camera_id:       str           = "EPSON_CAM_01",
+        output_dir:      str           = "inference_output",
+        device:          str           = "cpu",
+        skip_frames:     int           = 1,
+        backend_url:     Optional[str] = None,
+        use_onnx:        bool          = False,
+        temporal_window: int           = TEMPORAL_WINDOW,
     ):
         self._print_banner()
-        self.use_onnx    = use_onnx
-        self.conf        = confidence
-        self.iou_thresh  = iou
-        self.device      = device
-        self.skip_frames = skip_frames
-        self.camera_id   = camera_id
-        self.output_dir  = Path(output_dir)
+        self.use_onnx        = use_onnx
+        self.conf            = confidence
+        self.iou_thresh      = iou
+        self.device          = device
+        self.skip_frames     = skip_frames
+        self.camera_id       = camera_id
+        self.output_dir      = Path(output_dir)
+        self.temporal_window = temporal_window
 
         print(f"[INFO] Loading model  : {model_path}")
         if use_onnx:
             self._load_onnx(model_path)
         else:
+            if not HAS_ULTRALYTICS:
+                raise ImportError("pip install ultralytics")
             self.model = YOLO(model_path)
             self._verify_classes()
 
@@ -262,87 +555,64 @@ class APDInferencePipeline:
             save_screenshots = True,
             log_to_file      = True,
             backend_url      = backend_url,
+            temporal_window  = temporal_window,
         )
-
+        self.ppe_tracker = PPEVisualTracker(window=temporal_window)
         self.frame_count = 0
         self.fps_display = 0.0
         self.class_count = {name: 0 for name in CLASS_NAMES.values()}
 
         print(f"[INFO] Confidence     : {confidence}")
         print(f"[INFO] IoU NMS        : {NMS_IOU_THRESHOLD}")
-        print(f"[INFO] Input size     : {MODEL_INPUT_SIZE}px")
-        print(f"[INFO] Partial ratio  : {PARTIAL_PERSON_RATIO}")
+        print(f"[INFO] Temporal window: {temporal_window} frame")
         print(f"[INFO] Device         : {device}")
         print(f"[INFO] Skip frames    : {skip_frames}")
         print(f"[INFO] Backend        : {backend_url or 'OFF'}")
         print(f"[INFO] Format         : {'ONNX' if use_onnx else 'PyTorch .pt'}")
         print(f"[INFO] Output         : {self.output_dir.resolve()}\n")
 
-    # ─────────────────────────────────────────
-    #  LOAD ONNX
-    # ─────────────────────────────────────────
+    # ── LOAD ─────────────────────────────────
 
     def _load_onnx(self, model_path: str):
-        """Load model via ONNX Runtime (lebih cepat di CPU)."""
-        try:
-            import onnxruntime as ort
-        except ImportError:
-            raise ImportError("Install dulu: pip install onnxruntime")
-
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] \
-                    if self.device != "cpu" else ["CPUExecutionProvider"]
-        self.ort_session = ort.InferenceSession(model_path, providers=providers)
-        self.ort_input_name  = self.ort_session.get_inputs()[0].name
-        self.model = None
-        print(f"[INFO] ONNX Runtime   : {ort.__version__}")
-        print(f"[INFO] Providers      : {self.ort_session.get_providers()}")
-
-    # ─────────────────────────────────────────
-    #  VERIFIKASI KELAS
-    # ─────────────────────────────────────────
+        if not HAS_ONNX:
+            raise ImportError("pip install onnxruntime")
+        providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if self.device != "cpu" else ["CPUExecutionProvider"]
+        )
+        self.ort_session    = ort.InferenceSession(model_path, providers=providers)
+        self.ort_input_name = self.ort_session.get_inputs()[0].name
+        self.model          = None
+        print(f"[INFO] ONNX providers : {self.ort_session.get_providers()}")
 
     def _verify_classes(self):
-        model_names = self.model.names
-        expected    = CLASS_NAMES  # {0:'helmet', 1:'gloves', ... 10:'no_boots'}
-        mismatch    = [
-            f"  class {cid}: expected '{nm}', got '{model_names.get(cid, '???')}'"
-            for cid, nm in expected.items()
-            if model_names.get(cid) != nm
+        mismatch = [
+            f"  class {cid}: expected '{nm}', got '{self.model.names.get(cid,'???')}'"
+            for cid, nm in CLASS_NAMES.items()
+            if self.model.names.get(cid) != nm
         ]
-        print(f"[INFO] Model classes  : {model_names}")
         if mismatch:
-            print("[WARN] Class mismatch — cek CLASS_NAMES di violation_logic.py:")
+            print("[WARN] Class mismatch:")
             for m in mismatch:
                 print(m)
         else:
             print("[INFO] Class names    : ✓ semua 11 kelas sesuai")
 
-    # ─────────────────────────────────────────
-    #  INFERENCE + SCALE + NMS
-    # ─────────────────────────────────────────
+    # ── INFERENCE ────────────────────────────
 
     def run_inference(self, frame: np.ndarray) -> List[Detection]:
         orig_h, orig_w = frame.shape[:2]
-
         if self.use_onnx:
             return self._run_onnx(frame, orig_w, orig_h)
         else:
             return self._run_yolo(frame, orig_w, orig_h)
 
-    def _run_yolo(self, frame: np.ndarray, orig_w: int, orig_h: int) -> List[Detection]:
-        """Inference via Ultralytics YOLO (.pt)."""
-        if orig_w != MODEL_INPUT_SIZE or orig_h != MODEL_INPUT_SIZE:
-            frame_inp = cv2.resize(frame, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
-        else:
-            frame_inp = frame
-
-        results    = self.model(
-            frame_inp,
-            conf    = self.conf,
-            iou     = self.iou_thresh,
-            device  = self.device,
-            verbose = False,
-        )
+    def _run_yolo(self, frame, orig_w, orig_h) -> List[Detection]:
+        inp = (cv2.resize(frame, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
+               if (orig_w != MODEL_INPUT_SIZE or orig_h != MODEL_INPUT_SIZE)
+               else frame)
+        results    = self.model(inp, conf=self.conf, iou=self.iou_thresh,
+                                device=self.device, verbose=False)
         detections = []
         for result in results:
             if result.boxes is None:
@@ -351,247 +621,273 @@ class APDInferencePipeline:
                 cid   = int(box.cls[0].item())
                 cname = CLASS_NAMES.get(cid, f"class_{cid}")
                 conf  = float(box.conf[0].item())
-
-                raw_bbox         = tuple(float(v) for v in box.xyxy[0].tolist())
-                x1, y1, x2, y2  = scale_coords(raw_bbox, orig_w, orig_h)
-
+                raw   = tuple(float(v) for v in box.xyxy[0].tolist())
+                x1, y1, x2, y2 = scale_coords(raw, orig_w, orig_h)
                 if x2 <= x1 or y2 <= y1:
                     continue
-
-                detections.append(Detection(
-                    class_name = cname,
-                    confidence = conf,
-                    bbox       = (x1, y1, x2, y2),
-                ))
+                detections.append(Detection(cname, conf, (x1, y1, x2, y2)))
                 self.class_count[cname] = self.class_count.get(cname, 0) + 1
-
         return _apply_class_nms(detections, NMS_IOU_THRESHOLD)
 
-    def _run_onnx(self, frame: np.ndarray, orig_w: int, orig_h: int) -> List[Detection]:
-        """Inference via ONNX Runtime (.onnx) — lebih cepat di CPU."""
+    def _run_onnx(self, frame, orig_w, orig_h) -> List[Detection]:
         img = cv2.resize(frame, (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        img = np.transpose(img, (2, 0, 1))[np.newaxis, :]  # NCHW
-
-        outputs = self.ort_session.run(None, {self.ort_input_name: img})
-        # YOLOv8/v11 ONNX output: [1, num_classes+4, num_anchors]
-        preds = outputs[0][0]  # [84, 8400] atau [15, 8400] tergantung model
-
+        img = np.transpose(img, (2, 0, 1))[np.newaxis, :]
+        raw_out = self.ort_session.run(None, {self.ort_input_name: img})[0]
+        boxes, scores, labels = _decode_onnx_output(
+            raw_out, num_classes=len(CLASS_NAMES),
+            conf_thresh=self.conf, orig_w=orig_w, orig_h=orig_h,
+        )
         detections = []
-        num_classes = preds.shape[0] - 4
-        preds_t     = preds.T  # [8400, 84]
-
-        for row in preds_t:
-            boxes  = row[:4]
-            scores = row[4:]
-            cid    = int(np.argmax(scores))
-            conf   = float(scores[cid])
-
-            if conf < self.conf:
-                continue
-
-            cx, cy, bw, bh = boxes
-            x1 = float(cx - bw / 2)
-            y1 = float(cy - bh / 2)
-            x2 = float(cx + bw / 2)
-            y2 = float(cy + bh / 2)
-
-            cname           = CLASS_NAMES.get(cid, f"class_{cid}")
-            x1, y1, x2, y2 = scale_coords((x1, y1, x2, y2), orig_w, orig_h)
-
+        for i in range(len(scores)):
+            cid = int(labels[i])
+            cname = CLASS_NAMES.get(cid, f"class_{cid}")
+            x1, y1, x2, y2 = (int(v) for v in boxes[i])
             if x2 <= x1 or y2 <= y1:
                 continue
-
-            detections.append(Detection(
-                class_name = cname,
-                confidence = conf,
-                bbox       = (x1, y1, x2, y2),
-            ))
+            detections.append(Detection(cname, float(scores[i]), (x1, y1, x2, y2)))
             self.class_count[cname] = self.class_count.get(cname, 0) + 1
-
         return _apply_class_nms(detections, NMS_IOU_THRESHOLD)
 
-    # ─────────────────────────────────────────
-    #  PROSES FRAME
-    # ─────────────────────────────────────────
+    # ── PROSES FRAME ─────────────────────────
 
     def _process_frame(self, frame: np.ndarray) -> np.ndarray:
-        detections = self.run_inference(frame)
-        events     = self.violation_logic.process(
-            detections   = detections,
+        raw_dets = self.run_inference(frame)
+        dets     = resolve_conflicts(raw_dets)
+        events   = self.violation_logic.process(
+            detections   = dets,
             frame        = frame,
             frame_number = self.frame_count,
         )
-        apd_status = self.violation_logic.get_frame_status(
-            detections   = detections,
-            frame_height = frame.shape[0],
-        )
-        return self.draw_frame(frame, detections, events, apd_status)
+        return self.draw_frame(frame, dets, events)
 
-    # ─────────────────────────────────────────
-    #  VISUALISASI
-    # ─────────────────────────────────────────
+    # ── VISUALISASI ──────────────────────────
 
     def draw_frame(
         self,
         frame:      np.ndarray,
         detections: List[Detection],
         events:     List[ViolationEvent],
-        apd_status: dict,
     ) -> np.ndarray:
         """
-        Layer render (bawah → atas):
-          1. Bbox APD positif  — warna kelas
-          2. Bbox APD negatif  — merah + label
-          3. Bbox Person       — oranye/merah + label APD missing
-          4. Panel info kiri atas
-          5. Panel status K3 kanan atas  (5 APD Epson)
-          6. Banner pelanggaran bawah
+        LOGIKA RENDERING v6.1:
+
+        Patuh sempurna  → tidak ada bbox apapun di tubuhnya (frame bersih)
+        Melanggar       → hanya bbox violation di body-part yang bermasalah
+
+        Contoh: pakai helm+rompi tapi tanpa sarung tangan
+          → Hanya bbox 'NO GLOVES' di zona lengan/tangan yang muncul
+          → Tidak ada bbox lain di orang itu
+
+        Panel status APD tetap di kanan atas.
+        Banner pelanggaran muncul di bawah saat ada event aktif.
         """
         vis = frame.copy()
-        h, w = vis.shape[:2]
+        fh, fw = vis.shape[:2]
 
-        person_dets  = [d for d in detections if d.class_name == "Person"]
-        ppe_pos_dets = [d for d in detections if d.class_name in PPE_POSITIVE_CLASSES]
-        ppe_neg_dets = [d for d in detections if d.class_name in PPE_NEGATIVE_CLASSES]
-        none_dets    = [d for d in detections if d.class_name == "none"]
+        person_dets = [d for d in detections if d.class_name == "Person"]
 
-        # ── Layer 1: Bbox APD positif ─────────────────────────────────────
-        for det in ppe_pos_dets:
-            color  = CLASS_COLORS.get(det.class_name, (180, 180, 180))
-            status = _get_ppe_visual_status(det, person_dets, h)
+        # Hitung status APD per person
+        person_statuses: Dict[int, Dict[str, bool]] = {}
+        for pi, person in enumerate(person_dets):
+            if person.confidence < MIN_PERSON_CONF:
+                continue
+            person_statuses[pi] = get_person_ppe_status(
+                person, detections, fh, self.ppe_tracker
+            )
 
-            if status == "valid":
-                self._draw_bbox(vis, det, color, thickness=2)
+        any_violation = False
+
+        for pi, person in enumerate(person_dets):
+            if pi not in person_statuses:
+                continue
+
+            status  = person_statuses[pi]
+            missing = [ppe for ppe, ok in status.items() if not ok]
+
+            if not missing:
+                # ── Orang PATUH: tidak ada bbox, frame bersih ───────────
+                continue
+
+            # ── Orang MELANGGAR ─────────────────────────────────────────
+            any_violation = True
+
+            # Hitung bbox per body-part yang melanggar
+            viol_bboxes = compute_violation_bboxes(
+                person_det  = person,
+                all_dets    = detections,
+                missing_ppe = missing,
+                frame_w     = fw,
+                frame_h     = fh,
+            )
+
+            # Gambar setiap violation bbox
+            for ppe_cls, vbbox in viol_bboxes.items():
+                color = VIOL_COLORS.get(ppe_cls, VIOLATION_COLOR)
+                label = PPE_SHORT.get(ppe_cls, f"NO {ppe_cls.upper()}")
+                vx1, vy1, vx2, vy2 = vbbox
+
+                # Efek glow halus di tepi luar (transparan)
+                glow = vis.copy()
+                cv2.rectangle(glow, (vx1-3, vy1-3), (vx2+3, vy2+3), color, -1)
+                cv2.addWeighted(glow, 0.08, vis, 0.92, 0, vis)
+
+                # Bbox utama
+                cv2.rectangle(vis, (vx1, vy1), (vx2, vy2), color, 2)
+
+                # Label di atas (atau di bawah jika tidak ada ruang)
+                self._draw_viol_label(vis, label, vx1, vy1, vx2, color, fw, fh)
+
+            # Tanda merah kecil di pojok kiri atas bbox person
+            # (sebagai penanda "ada pelanggaran di sini" — minimalis)
+            px1, py1, px2, py2 = person.bbox
+            ms = max(10, min(20, int((py2 - py1) * 0.04)))
+            cv2.rectangle(vis, (px1, py1), (px1+ms, py1+ms), VIOLATION_COLOR, -1)
+            cv2.putText(
+                vis, "!",
+                (px1 + 3, py1 + ms - 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.36,
+                (255, 255, 255), 1, cv2.LINE_AA,
+            )
+
+        # ── Panel status APD kanan atas ─────────────────────────────────
+        self._draw_status_panel(vis, person_statuses, fw, fh)
+
+        # ── HUD info kiri atas ──────────────────────────────────────────
+        self._draw_hud(vis, fw, fh, len(person_dets), any_violation)
+
+        # ── Banner pelanggaran bawah ─────────────────────────────────────
+        if events:
+            unique = list({e.violation_type for e in events})
+            names  = ", ".join(t.replace("_", " ").upper() for t in unique)
+            modes  = list({e.detection_mode[:3].upper() for e in events})
+            ov3    = vis.copy()
+            cv2.rectangle(ov3, (0, fh-58), (fw, fh), (0, 0, 120), -1)
+            cv2.addWeighted(ov3, 0.82, vis, 0.18, 0, vis)
+            cv2.putText(
+                vis, f"  ⚠  PELANGGARAN K3: {names}",
+                (8, fh-30), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
+                (255, 255, 255), 2, cv2.LINE_AA,
+            )
+            cv2.putText(
+                vis, f"  Deteksi via: {' + '.join(modes)} mode  |  {len(events)} event(s)",
+                (8, fh-10), cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+                (180, 180, 180), 1, cv2.LINE_AA,
+            )
+
+        return vis
+
+    # ── HELPER DRAW ──────────────────────────
+
+    @staticmethod
+    def _draw_viol_label(
+        vis:   np.ndarray,
+        label: str,
+        x:     int,
+        y:     int,
+        x2:    int,
+        color: tuple,
+        fw:    int,
+        fh:    int,
+        scale: float = 0.50,
+        thick: int   = 1,
+    ):
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
+        # Jika ada ruang di atas → taruh di atas, jika tidak → di bawah bbox
+        if y - th - 8 >= 0:
+            lx  = max(0, min(x, fw - tw - 6))
+            ly1 = y - th - 8
+            ly2 = y - 2
+            ty  = y - 4
+        else:
+            lx  = max(0, min(x, fw - tw - 6))
+            ly1 = y + 2
+            ly2 = y + th + 8
+            ty  = y + th + 4
+        cv2.rectangle(vis, (lx, ly1), (lx + tw + 4, ly2), color, -1)
+        cv2.putText(vis, label, (lx + 2, ty),
+                    font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+    def _draw_status_panel(
+        self,
+        vis:             np.ndarray,
+        person_statuses: Dict[int, Dict[str, bool]],
+        fw:              int,
+        fh:              int,
+    ):
+        # Agregasi status dari semua person
+        agg: Dict[str, str] = {}
+        for ppe_cls in REQUIRED_PPE:
+            if not person_statuses:
+                agg[ppe_cls] = "UNKNOWN"
+            elif all(st.get(ppe_cls, True) for st in person_statuses.values()):
+                agg[ppe_cls] = "COMPLIANT"
             else:
-                # Orphan: tetap berwarna tapi outline tipis
-                x1, y1, x2, y2 = det.bbox
-                cv2.rectangle(vis, (x1, y1), (x2, y2), color, 1)
-                lbl = f"{det.class_name} {det.confidence:.2f}"
-                self._draw_label(vis, lbl, x1, y1, color, scale=0.38)
+                agg[ppe_cls] = "VIOLATION"
 
-        # ── Layer 2: Bbox APD negatif (MERAH) ────────────────────────────
-        for det in ppe_neg_dets:
-            x1, y1, x2, y2 = det.bbox
-            # Garis putus-putus merah untuk kelas negatif (lebih tebal)
-            cv2.rectangle(vis, (x1, y1), (x2, y2), VIOLATION_COLOR, 2)
-            lbl = f"!{det.class_name.upper()} {det.confidence:.2f}"
-            self._draw_label(vis, lbl, x1, y1, VIOLATION_COLOR, scale=0.42)
+        panel_w = 222
+        n_rows  = len(REQUIRED_PPE) + 1
+        panel_h = n_rows * 24 + 14
+        px      = fw - panel_w - 6
+        py      = 6
 
-        # ── Layer 3: Bbox Person ──────────────────────────────────────────
-        for det in person_dets:
-            x1, y1, x2, y2 = det.bbox
-            ppe_status   = get_person_ppe_dict(det, detections, frame_height=h)
-            is_violating = any(not ppe_status.get(ppe, False) for ppe in REQUIRED_PPE)
-            partial      = is_partial_person(det.bbox, h)
-
-            color = PERSON_VIOLATION_COLOR if is_violating else CLASS_COLORS["Person"]
-            thick = 3 if is_violating else 2
-            cv2.rectangle(vis, (x1, y1), (x2, y2), color, thick)
-
-            # Label APD yang hilang
-            missing = []
-            if not ppe_status.get("helmet",  False): missing.append("X Helm")
-            if not ppe_status.get("vest",    False): missing.append("X Rompi")
-            if not ppe_status.get("boots",   False): missing.append("X Boots")
-            if not ppe_status.get("goggles", False): missing.append("X Goggle")
-            if not ppe_status.get("gloves",  False): missing.append("X Gloves")
-
-            label = f"Person {det.confidence:.2f}"
-            if partial:
-                label += " [partial]"
-            if missing:
-                label += "  " + " | ".join(missing)
-
-            self._draw_label(vis, label, x1, y1, color)
-
-        # ── Layer 4: Panel info kiri atas ─────────────────────────────────
         ov = vis.copy()
-        cv2.rectangle(ov, (0, 0), (330, 130), (15, 15, 15), -1)
-        cv2.addWeighted(ov, 0.70, vis, 0.30, 0, vis)
+        cv2.rectangle(ov, (px-4, py), (px+panel_w, py+panel_h), (18, 18, 18), -1)
+        cv2.addWeighted(ov, 0.72, vis, 0.28, 0, vis)
 
-        total_viol  = self.violation_logic.stats["total_events"]
-        neg_hits    = self.violation_logic.stats.get("neg_class_hits", 0)
-        pos_hits    = self.violation_logic.stats.get("pos_absent_hits", 0)
-        lines = [
-            f"Camera  : {self.camera_id}",
-            f"Frame   : {self.frame_count}  |  FPS: {self.fps_display:.1f}",
-            f"Person  : {len(person_dets)}  |  Total Viol: {total_viol}",
-            f"NegCls  : {neg_hits}  |  PosAbs: {pos_hits}",
-            f"Conf    : {self.conf}  |  NMS: {NMS_IOU_THRESHOLD}",
-            f"Model   : {'ONNX' if self.use_onnx else 'PT'} | Epson K3 v5.0",
-        ]
-        for i, ln in enumerate(lines):
-            cv2.putText(vis, ln, (8, 20 + i * 19),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(vis, "STATUS APD — EPSON K3",
+                    (px, py+16), cv2.FONT_HERSHEY_SIMPLEX, 0.44,
+                    (200, 200, 200), 1, cv2.LINE_AA)
 
-        # ── Layer 5: Panel status K3 kanan atas (5 APD Epson) ───────────
-        STATUS_STYLE = {
+        STATUS_MAP = {
             "COMPLIANT": ("Patuh   ", COMPLIANT_COLOR),
             "VIOLATION": ("LANGGAR!", VIOLATION_COLOR),
             "UNKNOWN":   ("Tdk Ada ", UNKNOWN_COLOR),
         }
-        panel_w = 230
-        px      = w - panel_w - 8
-
-        ov2 = vis.copy()
-        panel_h = 26 + len(REQUIRED_PPE) * 26 + 6
-        cv2.rectangle(ov2, (px - 8, 0), (w, panel_h), (15, 15, 15), -1)
-        cv2.addWeighted(ov2, 0.70, vis, 0.30, 0, vis)
-
-        cv2.putText(vis, "STATUS APD — EPSON K3", (px, 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 200, 200), 1, cv2.LINE_AA)
         for i, ppe_cls in enumerate(REQUIRED_PPE):
-            lbl         = PANEL_LABELS.get(ppe_cls, ppe_cls)
-            s           = apd_status.get(ppe_cls, "UNKNOWN")
-            text, color = STATUS_STYLE[s]
-            cv2.putText(vis, f"{lbl}: {text}", (px, 36 + i * 26),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.56, color, 2, cv2.LINE_AA)
+            s        = agg.get(ppe_cls, "UNKNOWN")
+            txt, col = STATUS_MAP[s]
+            lbl      = PANEL_LABELS.get(ppe_cls, ppe_cls)
+            cv2.putText(
+                vis, f"{lbl}: {txt}",
+                (px, py + 16 + (i+1) * 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, col, 2, cv2.LINE_AA,
+            )
 
-        # ── Layer 6: Banner pelanggaran bawah ─────────────────────────────
-        if events:
-            # Tampilkan semua tipe pelanggaran unik
-            unique_types = list({e.violation_type for e in events})
-            names = ", ".join(t.replace("_", " ").upper() for t in unique_types)
-            modes = list({e.detection_mode[:3].upper() for e in events})
+    def _draw_hud(
+        self,
+        vis:           np.ndarray,
+        fw:            int,
+        fh:            int,
+        n_persons:     int,
+        any_violation: bool,
+    ):
+        ov = vis.copy()
+        cv2.rectangle(ov, (0, 0), (318, 114), (12, 12, 12), -1)
+        cv2.addWeighted(ov, 0.68, vis, 0.32, 0, vis)
 
-            ov3 = vis.copy()
-            cv2.rectangle(ov3, (0, h - 60), (w, h), (0, 0, 140), -1)
-            cv2.addWeighted(ov3, 0.85, vis, 0.15, 0, vis)
-            cv2.putText(vis, f"  PELANGGARAN: {names}",
-                        (8, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.68,
-                        (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(vis, f"  Deteksi via: {' + '.join(modes)} mode  |  {len(events)} event(s)",
-                        (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                        (180, 180, 180), 1, cv2.LINE_AA)
+        total_v  = self.violation_logic.stats["total_events"]
+        neg_hits = self.violation_logic.stats.get("neg_class_hits", 0)
+        pos_hits = self.violation_logic.stats.get("pos_absent_hits", 0)
+        temp_sv  = self.violation_logic.stats.get("temporal_saves", 0)
 
-        return vis
+        lines = [
+            f"Camera  : {self.camera_id}",
+            f"Frame   : {self.frame_count}  |  FPS: {self.fps_display:.1f}",
+            f"Person  : {n_persons}  |  Total Viol: {total_v}",
+            f"NegCls  : {neg_hits}  |  PosAbs: {pos_hits}",
+            f"TempSave: {temp_sv}  |  Conf: {self.conf}",
+            f"Model   : {'ONNX' if self.use_onnx else 'PT'} | K3 v6.1",
+        ]
+        for i, ln in enumerate(lines):
+            cv2.putText(vis, ln, (8, 18 + i*18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 220, 220), 1, cv2.LINE_AA)
 
-    # ─────────────────────────────────────────
-    #  HELPER DRAW
-    # ─────────────────────────────────────────
+        if any_violation:
+            cv2.rectangle(vis, (0, 0), (fw, fh), VIOLATION_COLOR, 3)
 
-    def _draw_bbox(self, vis: np.ndarray, det: Detection,
-                   color: tuple, thickness: int = 2):
-        x1, y1, x2, y2 = det.bbox
-        cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
-        self._draw_label(vis, f"{det.class_name} {det.confidence:.2f}", x1, y1, color)
-
-    @staticmethod
-    def _draw_label(vis: np.ndarray, label: str, x: int, y: int,
-                    bg: tuple, scale: float = 0.46, thick: int = 1):
-        fh, fw = vis.shape[:2]
-        font   = cv2.FONT_HERSHEY_SIMPLEX
-        (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
-        bg_y1  = max(0, y - th - 6)
-        bg_x2  = min(fw, x + tw + 4)
-        cv2.rectangle(vis, (x, bg_y1), (bg_x2, y), bg, -1)
-        cv2.putText(vis, label, (x + 2, max(th, y - 3)),
-                    font, scale, LABEL_FG, thick, cv2.LINE_AA)
-
-    # ─────────────────────────────────────────
-    #  MAIN LOOP
-    # ─────────────────────────────────────────
+    # ── MAIN LOOP ────────────────────────────
 
     def run(self, source, show_preview: bool = True, save_video: Optional[str] = None):
         if Path(str(source)).is_dir():
@@ -616,10 +912,10 @@ class APDInferencePipeline:
         total   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         print(f"[INFO] Source     : {source}")
-        print(f"[INFO] Resolusi   : {w_src}×{h_src} @ {fps_src:.1f}fps")
+        print(f"[INFO] Resolusi   : {w_src}x{h_src} @ {fps_src:.1f}fps")
         if total > 0:
             print(f"[INFO] Total frame: {total}")
-        print("[INFO] Tekan Q untuk berhenti.\n")
+        print("[INFO] Tekan Q/Esc untuk berhenti, R untuk reset memory.\n")
 
         writer  = self._init_writer(save_video, fps_src, w_src, h_src)
         t_start = time.perf_counter()
@@ -637,18 +933,23 @@ class APDInferencePipeline:
 
                 if self.frame_count % self.skip_frames != 0:
                     if show_preview:
-                        cv2.imshow("APD Monitor Epson K3 v5.0 [Q=quit]", frame)
-                        if cv2.waitKey(1) & 0xFF == ord("q"):
+                        cv2.imshow("APD Monitor Epson K3 v6.1 [Q=quit]", frame)
+                        if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                             break
                     continue
 
                 vis = self._process_frame(frame)
 
                 if show_preview:
-                    cv2.imshow("APD Monitor Epson K3 v5.0 [Q=quit]", vis)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                    cv2.imshow("APD Monitor Epson K3 v6.1 [Q=quit]", vis)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (ord("q"), 27):
                         print("\n[INFO] Dihentikan pengguna.")
                         break
+                    elif key == ord("r"):
+                        self.ppe_tracker.reset()
+                        self.violation_logic.reset_memory()
+                        print("[INFO] Memory di-reset.")
 
                 if writer:
                     writer.write(vis)
@@ -680,7 +981,6 @@ class APDInferencePipeline:
                 frame = cv2.imread(str(img_path))
                 if frame is None:
                     continue
-
                 self.frame_count += 1
                 elapsed          = time.perf_counter() - t_start
                 self.fps_display = self.frame_count / elapsed if elapsed > 0 else 0.0
@@ -692,8 +992,8 @@ class APDInferencePipeline:
                 vis = self._process_frame(frame)
 
                 if show_preview:
-                    cv2.imshow("APD Monitor Epson K3 v5.0 - Folder [Q=quit]", vis)
-                    if cv2.waitKey(30) & 0xFF == ord("q"):
+                    cv2.imshow("APD Monitor Epson K3 v6.1 - Folder [Q=quit]", vis)
+                    if cv2.waitKey(30) & 0xFF in (ord("q"), 27):
                         break
 
                 if writer:
@@ -718,23 +1018,24 @@ class APDInferencePipeline:
         return cv2.VideoWriter(path, fourcc, max(fps, 1.0), (w, h))
 
     def _print_banner(self):
-        print(f"\n{'='*65}")
-        print(f"  APD Inference Pipeline v5.0 — YOLOv11 | Epson Factory K3")
+        print(f"\n{'='*66}")
+        print(f"  APD Inference Pipeline v6.1 — YOLOv11 | Epson Factory K3")
         print(f"  11 Classes: helmet|gloves|vest|boots|goggles|none|Person")
         print(f"              no_helmet|no_goggle|no_gloves|no_boots")
-        print(f"  Detection: DUAL MODE (negative class + positive absent)")
+        print(f"  Detection: DUAL MODE + Temporal Smoothing + Conflict Resolve")
+        print(f"  BBox     : VIOLATION-ONLY — body-part anchor zone per APD")
         print(f"  Standard : Epson K3 — 5 APD Wajib")
-        print(f"{'='*65}")
+        print(f"{'='*66}")
 
     def _print_summary(self):
-        print(f"\n\n{'='*65}")
-        print(f"  RINGKASAN INFERENCE  [v5.0 Epson K3]")
-        print(f"{'='*65}")
+        print(f"\n\n{'='*66}")
+        print(f"  RINGKASAN INFERENCE  [v6.1 Epson K3]")
+        print(f"{'='*66}")
         print(f"  Total frame diproses : {self.frame_count}")
         print(f"\n  Deteksi per kelas:")
         for cname, count in self.class_count.items():
             if count > 0:
-                bar = "█" * min(count // 10, 28)
+                bar = "x" * min(count // 10, 28)
                 print(f"    {cname:<15}: {count:>6}  {bar}")
         self.violation_logic.print_summary()
 
@@ -745,7 +1046,7 @@ class APDInferencePipeline:
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="APD Inference v5.0 — Epson Factory K3 | 11-Class Dual Detection",
+        description="APD Inference v6.1 — Epson Factory K3 | Smart Violation BBox",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Contoh:
@@ -755,50 +1056,42 @@ Contoh:
   python inference.py --source 0 --model best.pt --conf 0.35 --no-backend
   python inference.py --source 0 --model best.pt --save-video out.mp4 --no-backend
   python inference.py --source 0 --model best.onnx --use-onnx --no-backend
-  python inference.py --source video.mp4 --model best.pt --camera-id EPSON_LINE_A
+  python inference.py --source images/ --model best.pt --no-backend
         """,
     )
-    p.add_argument("--source",      required=True,
-                   help="Sumber: 0=webcam, path video, RTSP URL")
-    p.add_argument("--model",       default="best.pt",
-                   help="Path model (.pt atau .onnx)")
-    p.add_argument("--conf",        type=float, default=0.30,
-                   help="Minimum confidence (default: 0.30)")
-    p.add_argument("--iou",         type=float, default=0.45,
-                   help="IoU threshold NMS (default: 0.45)")
-    p.add_argument("--device",      default="cpu",
-                   help="Device: cpu atau cuda:0")
-    p.add_argument("--camera-id",   default="EPSON_CAM_01",
-                   help="ID kamera untuk logging (default: EPSON_CAM_01)")
-    p.add_argument("--output",      default="inference_output",
-                   help="Folder output (default: inference_output)")
-    p.add_argument("--skip",        type=int, default=1,
-                   help="Proses setiap N frame (default: 1=semua)")
-    p.add_argument("--save-video",  default=None,
-                   help="Simpan output video ke file .mp4")
-    p.add_argument("--no-preview",  action="store_true",
-                   help="Nonaktifkan jendela preview OpenCV")
-    p.add_argument("--backend-url", default="http://localhost:8000",
-                   help="URL backend API (default: http://localhost:8000)")
-    p.add_argument("--no-backend",  action="store_true",
-                   help="Nonaktifkan pengiriman ke backend")
-    p.add_argument("--use-onnx",    action="store_true",
-                   help="Gunakan ONNX Runtime (lebih cepat di CPU)")
+    p.add_argument("--source",           required=True,
+                   help="Sumber: 0=webcam, path video/folder, RTSP URL")
+    p.add_argument("--model",            default="best.pt")
+    p.add_argument("--conf",             type=float, default=0.30)
+    p.add_argument("--iou",              type=float, default=0.45)
+    p.add_argument("--device",           default="cpu", help="cpu / cuda:0")
+    p.add_argument("--camera-id",        default="EPSON_CAM_01")
+    p.add_argument("--output",           default="inference_output")
+    p.add_argument("--skip",             type=int, default=1,
+                   help="Proses setiap N frame (default: 1)")
+    p.add_argument("--save-video",       default=None)
+    p.add_argument("--no-preview",       action="store_true")
+    p.add_argument("--backend-url",      default="http://localhost:8000")
+    p.add_argument("--no-backend",       action="store_true")
+    p.add_argument("--use-onnx",         action="store_true")
+    p.add_argument("--temporal-window",  type=int, default=TEMPORAL_WINDOW,
+                   help=f"Temporal smoothing window frame (default: {TEMPORAL_WINDOW})")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args     = parse_args()
     pipeline = APDInferencePipeline(
-        model_path  = args.model,
-        confidence  = args.conf,
-        iou         = args.iou,
-        camera_id   = args.camera_id,
-        output_dir  = args.output,
-        device      = args.device,
-        skip_frames = args.skip,
-        backend_url = None if args.no_backend else args.backend_url,
-        use_onnx    = args.use_onnx,
+        model_path      = args.model,
+        confidence      = args.conf,
+        iou             = args.iou,
+        camera_id       = args.camera_id,
+        output_dir      = args.output,
+        device          = args.device,
+        skip_frames     = args.skip,
+        backend_url     = None if args.no_backend else args.backend_url,
+        use_onnx        = args.use_onnx,
+        temporal_window = args.temporal_window,
     )
     pipeline.run(
         source       = args.source,
