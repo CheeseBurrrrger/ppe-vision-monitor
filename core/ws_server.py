@@ -71,6 +71,10 @@ def process_message(message):
         detections = pipeline.run_inference(frame)
     pipeline.frame_count += 1
 
+    live_violations = pipeline.violation_logic.get_live_violations(
+        detections=detections,
+        frame_height=frame.shape[0],
+    )
     events = pipeline.violation_logic.process(
         detections=detections,
         frame=frame,
@@ -87,11 +91,14 @@ def process_message(message):
             }
             for d in detections
         ],
-        "violations": [
+        "violations": live_violations,
+        "logged_events": [
             {
                 "type": e.violation_type,
                 "severity": e.severity,
                 "confidence": e.confidence,
+                "bbox": [e.bbox["x1"], e.bbox["y1"], e.bbox["x2"], e.bbox["y2"]],
+                "detection_mode": e.detection_mode,
             }
             for e in events
         ],

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const CAPTURE_WIDTH = 640;
 const CAPTURE_HEIGHT = 480;
 const FRAME_INTERVAL_MS = 500;
+const VIOLATION_OVERLAY_HOLD_MS = 1200;
 
 function formatTimestamp() {
   return new Date()
@@ -18,16 +19,28 @@ function formatTimestamp() {
     .replace(/\//g, "-");
 }
 
-function getDetectionColor(className) {
-  if (className === "Person") return "#2196F3";
-  if (className.startsWith("no_")) return "#FF0000";
-  return "#00CC00";
-}
-
 function formatConfidence(value) {
   const numberValue = Number(value);
   if (Number.isNaN(numberValue)) return value;
   return numberValue.toFixed(2);
+}
+
+function getViolationBbox(violation) {
+  const bbox = violation?.bbox;
+
+  if (Array.isArray(bbox) && bbox.length >= 4) {
+    return bbox.slice(0, 4).map(Number);
+  }
+
+  if (bbox && typeof bbox === "object") {
+    return [bbox.x1, bbox.y1, bbox.x2, bbox.y2].map(Number);
+  }
+
+  return null;
+}
+
+function getViolationType(violation) {
+  return violation?.type || violation?.violation_type || "violation";
 }
 
 export default function DetectionCameraFeed({
@@ -47,6 +60,7 @@ export default function DetectionCameraFeed({
   const frameIntervalRef = useRef(null);
   const violationTimeoutRef = useRef(null);
   const requestInFlightRef = useRef(false);
+  const activeViolationOverlayRef = useRef(false);
 
   const [timestamp, setTimestamp] = useState(formatTimestamp);
   const [streamReady, setStreamReady] = useState(false);
@@ -67,7 +81,7 @@ export default function DetectionCameraFeed({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
-  const drawBoxes = useCallback((detections) => {
+  const drawViolationBoxes = useCallback((nextViolations) => {
     const video = videoRef.current;
     const canvas = overlayCanvasRef.current;
     if (!canvas || !video) return;
@@ -85,14 +99,17 @@ export default function DetectionCameraFeed({
     const scaleX = width / CAPTURE_WIDTH;
     const scaleY = height / CAPTURE_HEIGHT;
 
-    detections.forEach((det) => {
-      const [x1, y1, x2, y2] = det.bbox;
-      const color = getDetectionColor(det.class);
+    nextViolations.forEach((violation) => {
+      const bbox = getViolationBbox(violation);
+      if (!bbox || bbox.some((value) => !Number.isFinite(value))) return;
+
+      const [x1, y1, x2, y2] = bbox;
+      const color = "#FF0000";
       const boxX = x1 * scaleX;
       const boxY = y1 * scaleY;
       const boxWidth = (x2 - x1) * scaleX;
       const boxHeight = (y2 - y1) * scaleY;
-      const labelText = `${det.class} ${formatConfidence(det.confidence)}`;
+      const labelText = `${getViolationType(violation)} ${formatConfidence(violation.confidence)}`;
       const labelWidth = Math.max(labelText.length * 7 + 8, 54);
       const labelY = Math.max(boxY - 20, 0);
 
@@ -118,12 +135,14 @@ export default function DetectionCameraFeed({
     let stream = null;
     let videoElement = null;
 
+    activeViolationOverlayRef.current = false;
     clearOverlay();
 
     const cleanup = () => {
       active = false;
       stream?.getTracks().forEach((track) => track.stop());
       if (videoElement) videoElement.srcObject = null;
+      activeViolationOverlayRef.current = false;
       clearOverlay();
     };
 
@@ -249,12 +268,20 @@ export default function DetectionCameraFeed({
       requestInFlightRef.current = false;
       try {
         const data = JSON.parse(event.data);
-        drawBoxes(data.detections || []);
+        const nextViolations = Array.isArray(data.violations) ? data.violations : [];
 
-        if (data.violations?.length > 0) {
-          setViolations(data.violations);
+        if (nextViolations.length > 0) {
+          activeViolationOverlayRef.current = true;
+          drawViolationBoxes(nextViolations);
+          setViolations(nextViolations);
           clearTimeout(violationTimeoutRef.current);
-          violationTimeoutRef.current = setTimeout(() => setViolations([]), 5000);
+          violationTimeoutRef.current = setTimeout(() => {
+            activeViolationOverlayRef.current = false;
+            setViolations([]);
+            clearOverlay();
+          }, VIOLATION_OVERLAY_HOLD_MS);
+        } else if (!activeViolationOverlayRef.current) {
+          clearOverlay();
         }
       } catch (err) {
         console.error("[WS] Invalid detection response:", err);
@@ -278,10 +305,11 @@ export default function DetectionCameraFeed({
       clearInterval(frameIntervalRef.current);
       clearTimeout(violationTimeoutRef.current);
       requestInFlightRef.current = false;
+      activeViolationOverlayRef.current = false;
       setWsReady(false);
       ws.close();
     };
-  }, [cameraError, disabled, drawBoxes, resolvedCameraId, streamReady]);
+  }, [cameraError, clearOverlay, disabled, drawViolationBoxes, resolvedCameraId, streamReady]);
 
   const statusText = cameraError ? "Offline" : wsReady ? "Detecting" : "Connecting";
   const statusClass = cameraError
@@ -335,7 +363,7 @@ export default function DetectionCameraFeed({
 
       {violations.length > 0 && (
         <div className="absolute bottom-3 left-3 right-3 bg-red-600/90 text-white text-xs px-2 py-1 rounded font-bold z-10">
-          ALERT: {violations.map((v) => v.type.replace(/_/g, " ").toUpperCase()).join(", ")}
+          ALERT: {violations.map((v) => getViolationType(v).replace(/_/g, " ").toUpperCase()).join(", ")}
         </div>
       )}
     </div>

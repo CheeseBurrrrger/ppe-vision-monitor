@@ -86,6 +86,11 @@ REQUIRED_PPE = ["helmet", "vest", "boots", "goggles", "gloves"]
 # APD yang dikecualikan saat person partial (hanya terlihat sebagian)
 PARTIAL_EXEMPT_PPE = {"boots", "gloves"}
 
+# APD yang aman dinilai dari "kelas positif tidak muncul".
+# Boots/gloves sering tidak terlihat pada crop wajah/badan, jadi jangan trigger
+# hanya karena deteksi boots/gloves positif absen.
+ABSENT_DETECTION_PPE = {"helmet", "vest", "goggles"}
+
 ALL_PPE = REQUIRED_PPE
 
 
@@ -308,17 +313,30 @@ def person_has_negative_ppe(
     secara spasial berada di dalam/dekat bbox person.
     Ini MODE PRIMER — lebih cepat dan akurat.
     """
+    return find_negative_ppe_detection(person_bbox, all_detections, neg_class) is not None
+
+
+def find_negative_ppe_detection(
+    person_bbox:    tuple,
+    all_detections: List[Detection],
+    neg_class:      str,
+) -> Optional[Detection]:
+    """
+    Return deteksi kelas negatif yang cocok dengan person.
+    Dipakai untuk bbox overlay violation agar tidak selalu memakai bbox Person.
+    """
     if neg_class is None:
-        return False
+        return None
 
     px1, py1, px2, py2 = person_bbox
     ph = py2 - py1
     if ph <= 0:
-        return False
+        return None
 
     y_lo, y_hi = Y_ZONES.get(neg_class, (0.0, 1.0))
     zone_y_min = py1 + y_lo * ph
     zone_y_max = py1 + y_hi * ph
+    matches: List[Detection] = []
 
     for det in all_detections:
         if det.class_name != neg_class:
@@ -331,14 +349,69 @@ def person_has_negative_ppe(
         # Check spasial — center di dalam bbox person
         if px1 <= cx <= px2 and py1 <= cy <= py2:
             if zone_y_min <= cy <= zone_y_max:
-                return True
+                matches.append(det)
+                continue
 
         # Fallback overlap
         if (overlap_ratio(det.bbox, person_bbox) >= MIN_OVERLAP
                 and zone_y_min <= cy <= zone_y_max):
-            return True
+            matches.append(det)
 
-    return False
+    if not matches:
+        return None
+
+    return max(matches, key=lambda d: d.confidence)
+
+
+def violation_zone_bbox(person_bbox: tuple, ppe_class: str) -> tuple:
+    """
+    Bbox fallback untuk pelanggaran berbasis absent-positive.
+    Karena objek yang hilang tidak punya bbox deteksi, gunakan zona PPE pada bbox person.
+    """
+    px1, py1, px2, py2 = person_bbox
+    pw = px2 - px1
+    ph = py2 - py1
+    if pw <= 0 or ph <= 0:
+        return person_bbox
+
+    y_lo, y_hi = Y_ZONES.get(ppe_class, (0.0, 1.0))
+    x_lo, x_hi = 0.0, 1.0
+    if ppe_class in {"helmet", "goggles"}:
+        x_lo, x_hi = 0.15, 0.85
+    elif ppe_class == "vest":
+        x_lo, x_hi = 0.10, 0.90
+    elif ppe_class in {"gloves", "boots"}:
+        x_lo, x_hi = 0.05, 0.95
+
+    return (
+        px1 + x_lo * pw,
+        py1 + y_lo * ph,
+        px1 + x_hi * pw,
+        py1 + y_hi * ph,
+    )
+
+
+def absent_detection_allowed(ppe_class: str) -> bool:
+    return ppe_class in ABSENT_DETECTION_PPE
+
+
+def make_live_violation_payload(
+    vtype: str,
+    rule: dict,
+    person: Detection,
+    detection_mode: str,
+    violation_bbox: tuple,
+    violation_confidence: float,
+) -> dict:
+    x1, y1, x2, y2 = violation_bbox
+    return {
+        "type": vtype,
+        "severity": rule["severity"],
+        "confidence": round(violation_confidence, 4),
+        "bbox": [x1, y1, x2, y2],
+        "detection_mode": detection_mode,
+        "person_bbox": list(person.bbox),
+    }
 
 
 def get_person_ppe_dict(
@@ -375,6 +448,8 @@ def get_person_ppe_dict(
             result[ppe] = False      # langgar: kelas negatif terdeteksi
         elif has_positive:
             result[ppe] = True       # patuh: APD ditemukan
+        elif not absent_detection_allowed(ppe):
+            result[ppe] = True       # tidak cukup bukti untuk absent-only violation
         else:
             result[ppe] = False      # tidak ada sinyal positif = anggap tidak pakai
 
@@ -471,17 +546,38 @@ class ViolationLogic:
                 # ─── MODE A: Deteksi kelas negatif (PRIMER) ───
                 neg_cls       = rule.get("neg_class")
                 neg_dets_only = [d for d in all_dets if d.class_name in PPE_NEGATIVE_CLASSES]
-                has_neg       = person_has_negative_ppe(person.bbox, neg_dets_only, neg_cls)
+                neg_match     = find_negative_ppe_detection(person.bbox, neg_dets_only, neg_cls)
+                has_neg       = neg_match is not None
 
                 # ─── MODE B: Absennya kelas positif (SEKUNDER) ───
                 ppe_dets_only = [d for d in all_dets if d.class_name in PPE_POSITIVE_CLASSES]
                 has_pos       = person_has_ppe_positive(person.bbox, ppe_dets_only, rule["ppe_class"], fh)
+                allow_absent  = absent_detection_allowed(rule["ppe_class"])
 
-                is_violation  = has_neg or (not has_pos)
+                is_violation  = has_neg or (allow_absent and not has_pos)
                 detect_mode   = "negative_class" if has_neg else "positive_absent"
 
                 if is_violation:
-                    ev = self._make_event(vtype, rule, person, frame, frame_number, detect_mode)
+                    violation_bbox = (
+                        neg_match.bbox
+                        if neg_match is not None
+                        else violation_zone_bbox(person.bbox, rule["ppe_class"])
+                    )
+                    violation_confidence = (
+                        neg_match.confidence
+                        if neg_match is not None
+                        else person.confidence
+                    )
+                    ev = self._make_event(
+                        vtype,
+                        rule,
+                        person,
+                        frame,
+                        frame_number,
+                        detect_mode,
+                        violation_bbox,
+                        violation_confidence,
+                    )
                     events.append(ev)
                     self._last_event_time[vtype]  = time.time()
                     self.stats["total_events"]    += 1
@@ -494,7 +590,7 @@ class ViolationLogic:
                     logger.warning(
                         f"PELANGGARAN | {vtype:12s} | {rule['severity']:6s} | "
                         f"mode={detect_mode[:3]} | "
-                        f"conf={person.confidence:.2f}"
+                        f"conf={violation_confidence:.2f}"
                         f"{' [partial]' if partial else ''} | fr={frame_number}"
                     )
                     if self.log_to_file:
@@ -503,6 +599,77 @@ class ViolationLogic:
                         self._send_backend(ev)
 
         return events
+
+    def get_live_violations(
+        self,
+        detections:   List[Detection],
+        frame_height: Optional[int] = None,
+    ) -> List[dict]:
+        """
+        Payload bbox pelanggaran untuk overlay realtime.
+        Tidak memakai cooldown/logging agar bbox tetap update setiap frame.
+        """
+        person_dets = [d for d in detections if d.class_name == "Person"]
+        all_dets    = [d for d in detections if d.class_name != "Person"]
+        if not person_dets:
+            return []
+
+        neg_dets_only = [d for d in all_dets if d.class_name in PPE_NEGATIVE_CLASSES]
+        ppe_dets_only = [d for d in all_dets if d.class_name in PPE_POSITIVE_CLASSES]
+        live_violations: List[dict] = []
+
+        for person in person_dets:
+            if person.confidence < MIN_PERSON_CONF:
+                continue
+
+            partial = bool(frame_height and is_partial_person(person.bbox, frame_height))
+
+            for vtype, rule in VIOLATION_RULES.items():
+                ppe_class = rule["ppe_class"]
+                if ppe_class not in self.required_ppe:
+                    continue
+                if partial and ppe_class in PARTIAL_EXEMPT_PPE:
+                    continue
+
+                neg_match = find_negative_ppe_detection(
+                    person.bbox,
+                    neg_dets_only,
+                    rule.get("neg_class"),
+                )
+                has_neg = neg_match is not None
+                has_pos = person_has_ppe_positive(
+                    person.bbox,
+                    ppe_dets_only,
+                    ppe_class,
+                    frame_height,
+                )
+                allow_absent = absent_detection_allowed(ppe_class)
+                if not has_neg and (has_pos or not allow_absent):
+                    continue
+
+                detection_mode = "negative_class" if has_neg else "positive_absent"
+                violation_bbox = (
+                    neg_match.bbox
+                    if neg_match is not None
+                    else violation_zone_bbox(person.bbox, ppe_class)
+                )
+                violation_confidence = (
+                    neg_match.confidence
+                    if neg_match is not None
+                    else person.confidence
+                )
+                live_violations.append(
+                    make_live_violation_payload(
+                        vtype,
+                        rule,
+                        person,
+                        detection_mode,
+                        violation_bbox,
+                        violation_confidence,
+                    )
+                )
+
+        return live_violations
 
     def get_frame_status(
         self,
@@ -555,13 +722,23 @@ class ViolationLogic:
     def _in_cooldown(self, vtype: str, cooldown: float) -> bool:
         return (time.time() - self._last_event_time.get(vtype, 0.0)) < cooldown
 
-    def _make_event(self, vtype, rule, person, frame, frame_number, detect_mode) -> ViolationEvent:
+    def _make_event(
+        self,
+        vtype,
+        rule,
+        person,
+        frame,
+        frame_number,
+        detect_mode,
+        violation_bbox=None,
+        violation_confidence=None,
+    ) -> ViolationEvent:
         now  = time.time()
         dt   = datetime.fromtimestamp(now, tz=timezone.utc)
-        x1, y1, x2, y2 = person.bbox
+        x1, y1, x2, y2 = violation_bbox or person.bbox
         fpath = None
         if self.save_screenshots and frame is not None:
-            fpath = self._save_screenshot(frame, person.bbox, dt, vtype)
+            fpath = self._save_screenshot(frame, (x1, y1, x2, y2), dt, vtype)
         return ViolationEvent(
             event_id       = f"{self.camera_id}_{frame_number}_{vtype}_{int(now)}",
             timestamp      = dt.isoformat(),
@@ -569,7 +746,7 @@ class ViolationLogic:
             violation_type = vtype,
             description    = rule["description"],
             severity       = rule["severity"],
-            confidence     = round(person.confidence, 4),
+            confidence     = round(violation_confidence or person.confidence, 4),
             bbox           = {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
             frame_number   = frame_number,
             frame_path     = fpath,
@@ -578,7 +755,7 @@ class ViolationLogic:
 
     def _save_screenshot(self, frame, bbox, dt, vtype) -> str:
         shot = frame.copy()
-        x1, y1, x2, y2 = bbox
+        x1, y1, x2, y2 = [int(round(v)) for v in bbox]
         cv2.rectangle(shot, (x1, y1), (x2, y2), VIOLATION_COLOR, 3)
         header_h = 70
         cv2.rectangle(shot, (0, 0), (shot.shape[1], header_h), (0, 0, 140), -1)
